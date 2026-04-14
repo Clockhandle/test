@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vanilla JS Three.js Express Setup</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Use an Import Map to tell the browser where 'three' comes from. -->
+  <!-- This lets you write `import * as THREE from 'three'` in plain JS! -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/node_modules/three/build/three.module.js",
+        "three/addons/": "/node_modules/three/examples/jsm/"
+      }
+    }
+  </script>
+
+  <!-- Load your main module script -->
+  <script type="module" src="main.js?v=2"></script>
+</head>
+<body>
+  <div class="ui-overlay">
+    <label for="json-upload"> Upload Mesh JSON: </label>
+    <input type="file" id="json-upload" accept=".json" />
+    <button id="draw-boundary-btn" style="margin-left: 10px;">Draw Boundary (Off)</button>
+    <button id="export-cgal-btn" style="margin-left: 10px; background: #007bff; color: white;">Export For CGAL</button>
+    <button id="stitch-mesh-btn" style="margin-left: 10px; background: #28a745; color: white;">Fast Stitch</button>
+  </div>
+  <canvas id="three-canvas"></canvas>
+</body>
+</html>
