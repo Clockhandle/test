@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import {setupFileInput} from './points_extractor.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'; 
-import { stitchLines, uniformStitch } from './stitcher.js'; // <-- NEW
+import { stitchLines } from './stitcher.js';
 import { setupAxisHelper, renderAxisHelper } from './axis_helper.js';
 import { setupBoundaryDrawer, getDrawnPoints } from './boundary_drawer.js';
 import { setupCameraMovement, updateCameraMovement } from './camera_movement.js';
+import { setupMesher } from './mesh_generator.js';
 
 let geometry, camera, line, scene, meshGroup
 const rawDataSegments = []; // Keep a reference to the untouched original lines
@@ -52,144 +53,7 @@ function initThreeJS() {
   setupCameraMovement();
 
   // ----- FAST Z-LAYER STITCHING LOGIC -----
-  const stitchBtn = document.getElementById('stitch-mesh-btn');
-  if (stitchBtn) {
-    stitchBtn.addEventListener('click', () => {
-      console.log('Stitch Button Clicked. Layers loaded:', rawDataSegments.length);
-      if (rawDataSegments.length < 2) {
-        alert("Need at least 2 layers of points loaded to stitch together!");
-        return;
-      }
-      
-      console.log('Total Layers to stitch:', rawDataSegments.length);
-
-      const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff });
-
-      let stitchedCount = 0;
-      for (let i = 0; i < rawDataSegments.length - 1; i++) {
-        console.log(`Stitching layer ${i} to layer ${i + 1}...`);
-        
-        const hue = (i / (rawDataSegments.length - 1)) * 360; 
-        const material = new THREE.MeshBasicMaterial({ 
-          color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`), 
-          side: THREE.DoubleSide, 
-          transparent: true,
-          opacity: 0.6 
-        });
-
-        let lineA = rawDataSegments[i];
-        let lineB = rawDataSegments[i + 1];
-
-        // --- BOUNDARY CONSTRAINT LOGIC ---
-        let hasActiveBoundary = false;
-
-        // If the user actively drew boundaries, we check if any apply to this specific layer pair!
-        if (getDrawnPoints().length >= 4) {
-
-          for (let p = 0; p < getDrawnPoints().length; p += 4) {
-            if (p + 3 >= getDrawnPoints().length) break;
-
-            const pt1 = getDrawnPoints()[p];
-            const pt2 = getDrawnPoints()[p+1];
-
-            // Safely grab the EXACT topological layer constraints recorded during click/drag
-            const layerA = pt1.layerIndex !== undefined ? pt1.layerIndex : 0;
-            const layerB = pt2.layerIndex !== undefined ? pt2.layerIndex : rawDataSegments.length - 1;
-            
-            const constraintMinLayer = Math.min(layerA, layerB);
-            const constraintMaxLayer = Math.max(layerA, layerB);
-
-            // HARDCODE: If the current layer pair (i and i+1) is completely outside the strictly drawn bounds, skip!
-            if (i < constraintMinLayer || i + 1 > constraintMaxLayer) {
-              continue;
-            }
-
-            // We found a boundary that explicitly controls this pair of layers!
-            hasActiveBoundary = true;
-
-            const findBounds = (line, currentLayerIndex) => {
-              let minIdx = Infinity, maxIdx = -Infinity;
-
-              for (let k = p; k <= p + 2; k += 2) {
-                const drawStart = getDrawnPoints()[k];
-                const drawEnd = getDrawnPoints()[k+1];
-                const wall = new THREE.Line3(drawStart, drawEnd);
-                
-                let closestDist = Infinity, closestIdx = -1, isSpannedByBoundary = false;
-
-                // First, check if this wall directly snapped to this exact layer!
-                // If it did, we completely bypass 3D math and perfectly use the topological index!
-                if (drawStart.layerIndex === currentLayerIndex && drawStart.vertexIndex !== undefined) {
-                   closestIdx = drawStart.vertexIndex;
-                   isSpannedByBoundary = true;
-                } else if (drawEnd.layerIndex === currentLayerIndex && drawEnd.vertexIndex !== undefined) {
-                   closestIdx = drawEnd.vertexIndex;
-                   isSpannedByBoundary = true;
-                } else {
-                  // Fallback for intermediate skipped layers: find mathematically closest vertex projection
-                  for (let j = 0; j < line.length; j++) {
-                    const worldPos = line[j].clone().applyMatrix4(meshGroup.matrixWorld);
-                    const t = wall.closestPointToPointParameter(worldPos, false);
-                    if (t >= -0.1 && t <= 1.1) {
-                      isSpannedByBoundary = true;
-                      let ptWall = new THREE.Vector3();
-                      wall.closestPointToPoint(worldPos, true, ptWall);
-                      const dist = ptWall.distanceTo(worldPos);
-                      if (dist < closestDist) {
-                        closestDist = dist;
-                        closestIdx = j;
-                      }
-                    }
-                  }
-                }
-
-                if (isSpannedByBoundary && closestIdx !== -1) {
-                  minIdx = Math.min(minIdx, closestIdx);
-                  maxIdx = Math.max(maxIdx, closestIdx);
-                }
-              }
-              return { minIdx, maxIdx };
-            };
-
-            const boundsA = findBounds(lineA, i);
-            const boundsB = findBounds(lineB, i + 1);
-
-            if (boundsA.minIdx !== Infinity && boundsB.minIdx !== Infinity && boundsA.minIdx !== boundsA.maxIdx && boundsB.minIdx !== boundsB.maxIdx) {
-              const slicedLineA = lineA.slice(boundsA.minIdx, boundsA.maxIdx + 1);
-              const slicedLineB = lineB.slice(boundsB.minIdx, boundsB.maxIdx + 1);
-              const stitchGeom = uniformStitch(slicedLineA, slicedLineB, 20.0);
-              if (stitchGeom) {
-                const mesh = new THREE.Mesh(stitchGeom, material);
-                meshGroup.add(mesh);
-                const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(stitchGeom), wireMat);
-                mesh.add(wireframe);
-                stitchedCount++;
-              }
-            }
-          }
-        }
-        
-        // If NO boundaries were drawn specifically over this pair of layers, just stitch the whole lines!
-        if (!hasActiveBoundary) {
-          const stitchGeom = uniformStitch(lineA, lineB, 20.0);
-          if (stitchGeom) {
-            const mesh = new THREE.Mesh(stitchGeom, material);
-            meshGroup.add(mesh);
-            const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(stitchGeom), wireMat);
-            mesh.add(wireframe);
-            stitchedCount++;
-          }
-        }
-      }
-
-      if (stitchedCount > 0) {
-        console.log(`Successfully added ${stitchedCount} multi-level mesh strips.`);
-        alert(`Successfully stitched ${stitchedCount} adjacent Z-layers together!`);
-      } else {
-        alert("Stitching failed or returned empty geometry.");
-      }
-    });
-  }
+  setupMesher(scene, rawDataSegments);
   // -------------------------------
 
 // Material
