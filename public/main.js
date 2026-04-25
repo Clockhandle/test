@@ -3,7 +3,7 @@ import {setupFileInput} from './points_extractor.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'; 
 import { stitchLines } from './stitcher.js';
 import { setupAxisHelper, renderAxisHelper } from './axis_helper.js';
-import { setupBoundaryDrawer, getDrawnPoints } from './boundary_drawer.js';
+import { setupBoundaryDrawer, getDrawnPoints, clearBoundaries } from './boundary_drawer.js';
 import { setupCameraMovement, updateCameraMovement } from './camera_movement.js';
 import { setupMesher } from './mesh_generator.js';
 
@@ -113,6 +113,9 @@ function handleNewPoints(arrayOfLineSegments) {
 
   // Clear out ANY old lines/points inside the group
   meshGroup.clear();
+
+  // Automatically clear old drawn boundaries so they don't incorrectly apply to the new file
+  clearBoundaries();
 
   const centerBox = new THREE.Box3(); // To calculate total bounds
 

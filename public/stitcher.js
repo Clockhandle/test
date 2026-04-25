@@ -82,67 +82,97 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   if (line1.length < 2 || line2.length < 2) return null;
 
   // 1. Check if line2 is drawn backwards relative to line1
-  const distStartToStart = line1[0].distanceTo(line2[0]);
-  const distStartToEnd = line1[0].distanceTo(line2[line2.length - 1]);
+  const distStartToStart = Math.hypot(line1[0].x - line2[0].x, line1[0].y - line2[0].y);
+  const distStartToEnd = Math.hypot(line1[0].x - line2[line2.length - 1].x, line1[0].y - line2[line2.length - 1].y);
   const workingLine2 = (distStartToEnd < distStartToStart) ? [...line2].reverse() : line2;
 
-  // 2. Map cumulative lengths to parameterize the curves from t=0.0 to t=1.0
-  function getLengths(line) {
+  // 2. Subdivide the lines horizontally so no segment is longer than maxEdgeLength.
+  // This physically preserves your drawn shapes while giving us enough vertices to build a uniform grid.
+  function subdivideLine(line, maxEdge) {
+    const result = [line[0].clone()];
+    for (let i = 1; i < line.length; i++) {
+        const p1 = line[i - 1];
+        const p2 = line[i];
+        const dist = p1.distanceTo(p2);
+        const steps = Math.ceil(dist / maxEdge);
+        for (let s = 1; s <= steps; s++) {
+            result.push(new THREE.Vector3().lerpVectors(p1, p2, s / steps));
+        }
+    }
+    return result;
+  }
+
+  const denseLine1 = subdivideLine(line1, maxEdgeLength);
+  const denseLine2 = subdivideLine(workingLine2, maxEdgeLength);
+
+  // 3. Compute Proportional Arc Length (t) based on 2D footprint to prevent folding
+  const getXYLengths = (line) => {
     let total = 0;
     const lengths = [0];
     for (let i = 1; i < line.length; i++) {
-        total += line[i - 1].distanceTo(line[i]);
+        const dx = line[i].x - line[i-1].x;
+        const dy = line[i].y - line[i-1].y;
+        total += Math.hypot(dx, dy);
         lengths.push(total);
     }
-    const max = total > 0 ? total : 1;
-    const normalized = lengths.map(l => l / max);
-    return { total, normalized };
-  }
+    const normalized = lengths.map(l => total > 0 ? l / total : 0);
+    return normalized;
+  };
 
-  const l1Data = getLengths(line1);
-  const l2Data = getLengths(workingLine2);
+  const t1Data = getXYLengths(denseLine1);
+  const t2Data = getXYLengths(denseLine2);
 
-  // Helper to trace the lines based on % completion (t)
-  function getPointAtT(line, normalizedLengths, t) {
-    if (t <= 0) return line[0].clone();
-    if (t >= 1) return line[line.length - 1].clone();
+  // 4. Proportional Arc-Length Zipper: Find corresponding pairs
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+
+  while (i < denseLine1.length - 1 || j < denseLine2.length - 1) {
+    pairs.push({ p1: denseLine1[i], p2: denseLine2[j] });
     
-    for (let i = 0; i < normalizedLengths.length - 1; i++) {
-        if (t >= normalizedLengths[i] && t <= normalizedLengths[i + 1]) {
-            const segmentStart = normalizedLengths[i];
-            const segmentEnd = normalizedLengths[i + 1];
-            const localT = (t - segmentStart) / (segmentEnd - segmentStart);
-            return new THREE.Vector3().lerpVectors(line[i], line[i + 1], localT);
-        }
+    if (i === denseLine1.length - 1) {
+      j++;
+    } else if (j === denseLine2.length - 1) {
+      i++;
+    } else {
+      const t1_next = t1Data[i + 1];
+      const t2_curr = t2Data[j];
+      const diffA = Math.abs(t1_next - t2_curr); 
+
+      const t1_curr = t1Data[i];
+      const t2_next = t2Data[j + 1];
+      const diffB = Math.abs(t1_curr - t2_next); 
+
+      if (diffA < diffB) {
+        i++;
+      } else {
+        j++;
+      }
     }
-    return line[line.length - 1].clone();
   }
+  // Push the final matched endpoint correctly
+  pairs.push({ p1: denseLine1[denseLine1.length - 1], p2: denseLine2[denseLine2.length - 1] });
 
-  // 3. Determine Grid Resolution
-  const maxLineLen = Math.max(l1Data.total, l2Data.total);
-  const uSteps = Math.max(2, Math.ceil(maxLineLen / maxEdgeLength)); // Horizontal Segments
+  // 5. Determine uniform Vertical Steps based on max ladder distance
+  let maxVDist = 0;
+  for (let k = 0; k < pairs.length; k++) {
+      const d = pairs[k].p1.distanceTo(pairs[k].p2);
+      if (d > maxVDist) maxVDist = d;
+  }
+  const vSteps = Math.max(1, Math.ceil(maxVDist / maxEdgeLength));
 
-  const startDist = line1[0].distanceTo(workingLine2[0]);
-  const endDist = line1[line1.length - 1].distanceTo(workingLine2[workingLine2.length - 1]);
-  const maxVDist = Math.max(startDist, endDist);
-  const vSteps = Math.max(1, Math.ceil(maxVDist / maxEdgeLength)); // Vertical Segments (Z-Layers)
-
-  // 4. Generate the perfectly spaced vertices grid!
+  // 6. Generate perfect grid intersections
   const grid = [];
   for (let v = 0; v <= vSteps; v++) {
     const vT = v / vSteps;
     const currentLine = [];
-    for (let u = 0; u <= uSteps; u++) {
-        const uT = u / uSteps;
-        const p1 = getPointAtT(line1, l1Data.normalized, uT);
-        const p2 = getPointAtT(workingLine2, l2Data.normalized, uT);
-        // Lerp between top line and bottom line to create "middle points"
-        currentLine.push(new THREE.Vector3().lerpVectors(p1, p2, vT));
+    for (let k = 0; k < pairs.length; k++) {
+        currentLine.push(new THREE.Vector3().lerpVectors(pairs[k].p1, pairs[k].p2, vT));
     }
     grid.push(currentLine);
   }
 
-  // 5. Connect the grid dots into Triangles
+  // 7. Connect the grid nodes into Triangles
   const allVertices = [];
   const allIndices = [];
   let vertexOffset = 0;
@@ -157,23 +187,47 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
 
     const rowLen = rowA.length;
     for (let c = 0; c < rowLen - 1; c++) {
-        // Triangle 1
-        allIndices.push(
-          vertexOffset + c,
-          vertexOffset + rowLen + c + 1,
-          vertexOffset + rowLen + c
-        );
-        // Triangle 2
-        allIndices.push(
-          vertexOffset + c,
-          vertexOffset + c + 1,
-          vertexOffset + rowLen + c + 1
-        );
+        const p0 = rowA[c];
+        const p1 = rowA[c + 1];
+        const p2 = rowB[c];
+        const p3 = rowB[c + 1];
+
+        // Ensure we aren't creating degenerate (0-area) triangles which can happen 
+        // during fanning stages on the zipper.
+        
+        // Triangle 1: p0, p3, p2
+        const D1 = p0.distanceTo(p3);
+        const D2 = p3.distanceTo(p2);
+        const D3 = p2.distanceTo(p0);
+        const S1 = (D1 + D2 + D3) / 2;
+        const Area1 = Math.sqrt(Math.max(0, S1 * (S1 - D1) * (S1 - D2) * (S1 - D3)));
+        
+        if (Area1 > 0.0001) {
+            allIndices.push(
+              vertexOffset + c,
+              vertexOffset + rowLen + c + 1,
+              vertexOffset + rowLen + c
+            );
+        }
+
+        // Triangle 2: p0, p1, p3
+        const da = p0.distanceTo(p1);
+        const db = p1.distanceTo(p3);
+        const dc = p3.distanceTo(p0);
+        const S2 = (da + db + dc) / 2;
+        const Area2 = Math.sqrt(Math.max(0, S2 * (S2 - da) * (S2 - db) * (S2 - dc)));
+        
+        if (Area2 > 0.0001) {
+            allIndices.push(
+              vertexOffset + c,
+              vertexOffset + c + 1,
+              vertexOffset + rowLen + c + 1
+            );
+        }
     }
     vertexOffset += rowLen * 2;
   }
 
-  // 6. Bake the structured uniform geometry
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(allVertices, 3));
   geometry.setIndex(allIndices);

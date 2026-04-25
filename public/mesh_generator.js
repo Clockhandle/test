@@ -93,12 +93,7 @@ export function setupMesher(scene, rawDataSegments) {
           }
       }
 
-      // Target condition 2: If NO overlap was found, we still stitch upward to the absolute closest nearby peak
-      if (targetJs.length === 0 && closestJ !== -1) {
-          targetJs.push(closestJ);
-      }
-
-      // Target condition 3: User EXPLICITLY drew a boundary connecting these two! Override distance.
+      // Target condition 2: User EXPLICITLY drew a boundary connecting these two! Override distance.
       if (getDrawnPoints().length >= 4) {
           for (let j of candidates) {
               if (targetJs.includes(j)) continue; // Already added
@@ -151,8 +146,23 @@ export function setupMesher(scene, rawDataSegments) {
             const constraintMinLayer = Math.min(layerA, layerB);
             const constraintMaxLayer = Math.max(layerA, layerB);
 
+            // Fetch the absolute Z heights for strict topological filtering
+            const zBoundMin = Math.min(rawDataSegments[layerA][0].z, rawDataSegments[layerB][0].z);
+            const zBoundMax = Math.max(rawDataSegments[layerA][0].z, rawDataSegments[layerB][0].z);
+            const zTargetJ = rawDataSegments[targetJ][0].z;
+
             // HARDCODE: If the current layer pair (i and targetJ) is completely outside the strictly drawn bounds, skip!
             if (i < constraintMinLayer || targetJ > constraintMaxLayer) {
+              continue;
+            }
+
+            // --- STRICT Y-BRANCHING BOUNDARY FIX ---
+            // If this pair's upper level hits the exact Z-height of the boundary's roof, 
+            // but isn't the EXACT layer index snapped by the user, skip it! (e.g. layer 12 and 13 same height)
+            if (Math.abs(zTargetJ - zBoundMax) < 0.001 && targetJ !== constraintMaxLayer) {
+              continue;
+            }
+            if (Math.abs(zA - zBoundMin) < 0.001 && i !== constraintMinLayer) {
               continue;
             }
 

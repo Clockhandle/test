@@ -16,6 +16,14 @@ export function getDrawnPoints() {
     return drawnPoints;
 }
 
+export function clearBoundaries() {
+    drawnPoints.length = 0;
+    if (boundaryLine && boundaryLine.geometry) {
+        boundaryLine.geometry.dispose();
+        boundaryLine.geometry = new THREE.BufferGeometry();
+    }
+}
+
 export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
   const drawBtn = document.getElementById('draw-boundary-btn');
   if (!drawBtn) return;
