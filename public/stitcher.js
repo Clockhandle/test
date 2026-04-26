@@ -18,10 +18,17 @@ export function stitchLines(line1, line2) {
   for (let p of line2) vertices.push(p.x, p.y, p.z);
 
   // Optional: Check if lines are drawn in opposite directions and reverse the virtual reading if needed.
-  // We compare the start of line1 to start vs end of line2.
-  const distStartToStart = line1[0].distanceTo(line2[0]);
-  const distStartToEnd = line1[0].distanceTo(line2[L2 - 1]);
-  const reverseL2 = distStartToEnd < distStartToStart;
+  // We compare the total cost of Forward(SS+EE) vs Backward(SE+ES).
+  const dSS = Math.hypot(line1[0].x - line2[0].x, line1[0].y - line2[0].y);
+  const dEE = Math.hypot(line1[L1 - 1].x - line2[L2 - 1].x, line1[L1 - 1].y - line2[L2 - 1].y);
+  
+  const dSE = Math.hypot(line1[0].x - line2[L2 - 1].x, line1[0].y - line2[L2 - 1].y);
+  const dES = Math.hypot(line1[L1 - 1].x - line2[0].x, line1[L1 - 1].y - line2[0].y);
+
+  const forwardCost = dSS + dEE;
+  const backwardCost = dSE + dES;
+
+  const reverseL2 = backwardCost < forwardCost;
   
   console.log(`Stitching Lines. L1: ${L1}, L2: ${L2}. Reversing Line 2? ${reverseL2}`);
 
@@ -81,12 +88,7 @@ export function stitchLines(line1, line2) {
 export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   if (line1.length < 2 || line2.length < 2) return null;
 
-  // 1. Check if line2 is drawn backwards relative to line1
-  const distStartToStart = Math.hypot(line1[0].x - line2[0].x, line1[0].y - line2[0].y);
-  const distStartToEnd = Math.hypot(line1[0].x - line2[line2.length - 1].x, line1[0].y - line2[line2.length - 1].y);
-  const workingLine2 = (distStartToEnd < distStartToStart) ? [...line2].reverse() : line2;
-
-  // 2. Subdivide the lines horizontally so no segment is longer than maxEdgeLength.
+  // 1. Subdivide the lines horizontally so no segment is longer than maxEdgeLength.
   // This physically preserves your drawn shapes while giving us enough vertices to build a uniform grid.
   function subdivideLine(line, maxEdge) {
     const result = [line[0].clone()];
@@ -94,7 +96,7 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const p1 = line[i - 1];
         const p2 = line[i];
         const dist = p1.distanceTo(p2);
-        const steps = Math.ceil(dist / maxEdge);
+        const steps = Math.max(1, Math.ceil(dist / maxEdge));
         for (let s = 1; s <= steps; s++) {
             result.push(new THREE.Vector3().lerpVectors(p1, p2, s / steps));
         }
@@ -103,76 +105,103 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   }
 
   const denseLine1 = subdivideLine(line1, maxEdgeLength);
-  const denseLine2 = subdivideLine(workingLine2, maxEdgeLength);
+  const denseLine2Fwd = subdivideLine(line2, maxEdgeLength);
+  const denseLine2Rev = subdivideLine([...line2].reverse(), maxEdgeLength);
 
-  // 3. Compute Proportional Arc Length (t) based on 2D footprint to prevent folding
-  const getXYLengths = (line) => {
-    let total = 0;
-    const lengths = [0];
-    for (let i = 1; i < line.length; i++) {
-        const dx = line[i].x - line[i-1].x;
-        const dy = line[i].y - line[i-1].y;
-        total += Math.hypot(dx, dy);
-        lengths.push(total);
-    }
-    const normalized = lengths.map(l => total > 0 ? l / total : 0);
-    return normalized;
-  };
+  // 2. Dynamic Programming (Fuchs-Kedem-Uselton algorithm)
+  // Evaluates every single possible matching combination between the curves 
+  // and returns the globally optimal one that creates the absolute shortest 
+  // spanning rungs (prevents folds, cracks, and inversions perfectly).
+  function getDPZipper(L1, L2) {
+      const N = L1.length;
+      const M = L2.length;
+      const dp = new Float32Array(N * M);
+      const choice = new Int8Array(N * M); 
+      
+      const getXYDist = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
-  const t1Data = getXYLengths(denseLine1);
-  const t2Data = getXYLengths(denseLine2);
-
-  // 4. Proportional Arc-Length Zipper: Find corresponding pairs
-  const pairs = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < denseLine1.length - 1 || j < denseLine2.length - 1) {
-    pairs.push({ p1: denseLine1[i], p2: denseLine2[j] });
-    
-    if (i === denseLine1.length - 1) {
-      j++;
-    } else if (j === denseLine2.length - 1) {
-      i++;
-    } else {
-      const t1_next = t1Data[i + 1];
-      const t2_curr = t2Data[j];
-      const diffA = Math.abs(t1_next - t2_curr); 
-
-      const t1_curr = t1Data[i];
-      const t2_next = t2Data[j + 1];
-      const diffB = Math.abs(t1_curr - t2_next); 
-
-      if (diffA < diffB) {
-        i++;
-      } else {
-        j++;
+      dp[0] = 0;
+      for (let i = 1; i < N; i++) {
+          dp[i * M] = dp[(i - 1) * M] + getXYDist(L1[i], L2[0]);
+          choice[i * M] = 1;
       }
-    }
-  }
-  // Push the final matched endpoint correctly
-  pairs.push({ p1: denseLine1[denseLine1.length - 1], p2: denseLine2[denseLine2.length - 1] });
+      for (let j = 1; j < M; j++) {
+          dp[j] = dp[j - 1] + getXYDist(L1[0], L2[j]);
+          choice[j] = 2;
+      }
 
-  // 5. Determine uniform Vertical Steps based on max ladder distance
+      for (let i = 1; i < N; i++) {
+          for (let j = 1; j < M; j++) {
+              const crossCost = getXYDist(L1[i], L2[j]);
+              // 1: Move along L1
+              const cost1 = dp[(i - 1) * M + j] + crossCost;
+              // 2: Move along L2
+              const cost2 = dp[i * M + (j - 1)] + crossCost;
+              // 3: DIAGONAL MOVE (Both curve pointers advance). Essential for smooth parallel shapes!
+              const cost3 = dp[(i - 1) * M + (j - 1)] + crossCost * 1.0; 
+              
+              if (cost3 <= cost1 && cost3 <= cost2) {
+                  dp[i * M + j] = cost3;
+                  choice[i * M + j] = 3;
+              } else if (cost1 < cost2) {
+                  dp[i * M + j] = cost1;
+                  choice[i * M + j] = 1;
+              } else {
+                  dp[i * M + j] = cost2;
+                  choice[i * M + j] = 2;
+              }
+          }
+      }
+
+      const path = [];
+      let currI = N - 1;
+      let currJ = M - 1;
+      while (currI > 0 || currJ > 0) {
+          path.push({ p1: L1[currI], p2: L2[currJ] });
+          const move = choice[currI * M + currJ];
+          if (move === 3) {
+              currI--;
+              currJ--;
+          } else if (move === 1) {
+              currI--;
+          } else {
+              currJ--;
+          }
+      }
+      path.push({ p1: L1[0], p2: L2[0] });
+      path.reverse();
+      
+      return { pairs: path, totalCost: dp[N * M - 1] };
+  }
+
+  // 3. We run the matrix in BOTH forward and backward mapping completely blindly.
+  // Whoever uses the least amount of "string" to tie the shapes together is mathematically 
+  // guaranteed to be the correct, untwisted alignment.
+  const fwdResult = getDPZipper(denseLine1, denseLine2Fwd);
+  const revResult = getDPZipper(denseLine1, denseLine2Rev);
+
+  const bestPairs = (revResult.totalCost < fwdResult.totalCost) ? revResult.pairs : fwdResult.pairs;
+
+  // 4. Determine uniform Vertical Steps based on max ladder distance
   let maxVDist = 0;
-  for (let k = 0; k < pairs.length; k++) {
-      const d = pairs[k].p1.distanceTo(pairs[k].p2);
+  for (let k = 0; k < bestPairs.length; k++) {
+      const d = bestPairs[k].p1.distanceTo(bestPairs[k].p2);
       if (d > maxVDist) maxVDist = d;
   }
   const vSteps = Math.max(1, Math.ceil(maxVDist / maxEdgeLength));
 
-  // 6. Generate perfect grid intersections
+  // 5. Generate perfect grid intersections
   const grid = [];
   for (let v = 0; v <= vSteps; v++) {
     const vT = v / vSteps;
     const currentLine = [];
-    for (let k = 0; k < pairs.length; k++) {
-        currentLine.push(new THREE.Vector3().lerpVectors(pairs[k].p1, pairs[k].p2, vT));
+    for (let k = 0; k < bestPairs.length; k++) {
+        currentLine.push(new THREE.Vector3().lerpVectors(bestPairs[k].p1, bestPairs[k].p2, vT));
     }
     grid.push(currentLine);
   }
 
-  // 7. Connect the grid nodes into Triangles
+  // 6. Connect the grid nodes into Triangles
   const allVertices = [];
   const allIndices = [];
   let vertexOffset = 0;
@@ -232,6 +261,13 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(allVertices, 3));
   geometry.setIndex(allIndices);
   geometry.computeVertexNormals();
+
+  const debugRungVerts = [];
+  for (let p of bestPairs) {
+      debugRungVerts.push(p.p1.x, p.p1.y, p.p1.z);
+      debugRungVerts.push(p.p2.x, p.p2.y, p.p2.z);
+  }
+  geometry.userData = { debugRungs: debugRungVerts };
 
   return geometry;
 }

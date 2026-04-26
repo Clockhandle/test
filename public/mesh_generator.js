@@ -220,6 +220,7 @@ export function setupMesher(scene, rawDataSegments) {
               const slicedLineA = lineA.slice(boundsA.minIdx, boundsA.maxIdx + 1);
               const slicedLineB = lineB.slice(boundsB.minIdx, boundsB.maxIdx + 1);
               const stitchGeom = uniformStitch(slicedLineA, slicedLineB, 20.0);
+              
               if (stitchGeom) {
                 const mesh = new THREE.Mesh(stitchGeom, material);
                 meshGroup.add(mesh);
@@ -234,11 +235,30 @@ export function setupMesher(scene, rawDataSegments) {
         // If NO boundaries were drawn specifically over this pair of layers, just stitch the whole lines!
         if (!hasActiveBoundary) {
           const stitchGeom = uniformStitch(lineA, lineB, 20.0);
+          
+          if (stitchGeom && stitchGeom.userData && stitchGeom.userData.debugRungs) {
+              const rungsGeometry = new THREE.BufferGeometry();
+              rungsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(stitchGeom.userData.debugRungs, 3));
+              // Disable depth testing so the lines render ON TOP of everything, and make them bright yellow
+              const rungsMaterial = new THREE.LineBasicMaterial({ 
+                  color: 0xffff00, 
+                  linewidth: 3,
+                  depthTest: false,
+                  depthWrite: false
+              }); 
+              const debugMesh = new THREE.LineSegments(rungsGeometry, rungsMaterial);
+              debugMesh.renderOrder = 999;
+              meshGroup.add(debugMesh);
+          }
+
           if (stitchGeom) {
             const mesh = new THREE.Mesh(stitchGeom, material);
             meshGroup.add(mesh);
-            const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(stitchGeom), wireMat);
-            mesh.add(wireframe);
+            
+            // TEMPORARILY DISABLED WHITE WIREFRAME FOR DEBUGGING VISIBILITY
+            // const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(stitchGeom), wireMat);
+            // mesh.add(wireframe);
+            
             stitchedCount++;
           }
         }
