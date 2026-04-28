@@ -22,12 +22,18 @@ export async function setupFileInput(onDataLoaded) {
         let currentSegment = [];
         let currentZ = null;
 
+        const isBoundary = meshItem.IsBoundary === true || 
+                           meshItem.Type === 'Polyline3d' || 
+                           meshItem.Type === '3D Polyline' || 
+                           meshItem.Type === 'Boundary';
+
         meshItem.FlattenedVertices.forEach(vertex => {
           const z = vertex[2];
           
-          // If the Z value changes, start a new line segment
-          if (currentZ !== null && currentZ !== z) {
+          // If the Z value changes, start a new line segment (UNLESS it's a boundary line, which is allowed to be 3D!)
+          if (!isBoundary && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
+              currentSegment.isBoundary = false;
               lineSegments.push(currentSegment);
             }
             currentSegment = [];
@@ -38,6 +44,7 @@ export async function setupFileInput(onDataLoaded) {
         });
         
         if (currentSegment.length > 0) {
+          currentSegment.isBoundary = isBoundary;
           lineSegments.push(currentSegment);
         }
       });

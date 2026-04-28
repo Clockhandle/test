@@ -30,74 +30,22 @@ export function setupMesher(scene, rawDataSegments) {
       const zA = lineA[0].z;
 
       // --- DYNAMIC VERTICAL TOPOLOGY FIX ---
-      // Find ALL correct physical partners on the NEXT Z level.
+      // Find valid partners either by geographic overlap (on the earliest valid Z level below)
+      // OR by explicit user-drawn boundaries (which bypass strict Z-level grouping).
       let targetJs = [];
-      let nextZ = null;
-      let candidates = [];
+      let foundOverlapZ = null;
 
-      // 1. Gather all candidates on the next available Z-level
-      for (let j = i + 1; j < rawDataSegments.length; j++) {
-          const zB = rawDataSegments[j][0].z;
-          
-          // Skip lines that share the exact same Z height
-          if (Math.abs(zB - zA) < 0.001) continue;
-
-          // If we've found a new height level, lock it. If we move past it, stop searching!
-          if (nextZ !== null && Math.abs(zB - nextZ) > 0.001) break;
-          nextZ = zB;
-          
-          candidates.push(j);
-      }
-
-      if (candidates.length === 0) continue; // Top of the mountain, nothing above it
-
-      // Bounding box for fast geographic overlap checking
       const boxA = new THREE.Box3().setFromPoints(lineA);
-      // Expand slightly just to be safe with adjacent but non-intersecting grids
       const expandFactor = new THREE.Vector3(5, 5, 0); 
       boxA.expandByVector(expandFactor);
 
-      let closestJ = -1;
-      let minDistance = Infinity;
+      for (let j = i + 1; j < rawDataSegments.length; j++) {
+          const zB = rawDataSegments[j][0].z;
+          if (Math.abs(zB - zA) < 0.001) continue;
 
-      // 2. Evaluate all candidates for physical overlaps and proximity
-      for (let j of candidates) {
-          const lineB_cand = rawDataSegments[j];
-          
-          // Geographic overlap test (XY plane)
-          const boxB = new THREE.Box3().setFromPoints(lineB_cand);
-          boxB.expandByVector(expandFactor);
-          const overlapXY = !(boxA.max.x < boxB.min.x || boxA.min.x > boxB.max.x ||
-                              boxA.max.y < boxB.min.y || boxA.min.y > boxB.max.y);
-
-          // Compute actual geographic proximity
-          let currentMin = Infinity;
-          const stepA = Math.max(1, Math.floor(lineA.length / 10)); 
-          const stepB = Math.max(1, Math.floor(lineB_cand.length / 10));
-          
-          for(let a = 0; a < lineA.length; a += stepA) {
-              for(let b = 0; b < lineB_cand.length; b += stepB) {
-                  const dist = Math.hypot(lineA[a].x - lineB_cand[b].x, lineA[a].y - lineB_cand[b].y);
-                  if (dist < currentMin) currentMin = dist;
-              }
-          }
-
-          if (currentMin < minDistance) {
-              minDistance = currentMin;
-              closestJ = j;
-          }
-
-          // Target condition 1: Geographic Overlap
-          if (overlapXY) {
-              if (!targetJs.includes(j)) targetJs.push(j);
-          }
-      }
-
-      // Target condition 2: User EXPLICITLY drew a boundary connecting these two! Override distance.
-      if (getDrawnPoints().length >= 4) {
-          for (let j of candidates) {
-              if (targetJs.includes(j)) continue; // Already added
-
+          // Target condition 1: User EXPLICITLY drew a boundary connecting these two! Override distance out-of-the-box.
+          let explicitlyLinked = false;
+          if (getDrawnPoints().length >= 4) {
               for (let p = 0; p < getDrawnPoints().length; p += 4) {
                   if (p + 3 >= getDrawnPoints().length) break;
                   const pt1 = getDrawnPoints()[p];
@@ -106,12 +54,68 @@ export function setupMesher(scene, rawDataSegments) {
                   const layer2 = pt2.layerIndex !== undefined ? pt2.layerIndex : -1;
                   
                   if ((layer1 === i && layer2 === j) || (layer1 === j && layer2 === i)) {
-                      targetJs.push(j);
+                      explicitlyLinked = true;
                       break;
                   }
               }
           }
+
+          if (explicitlyLinked) {
+              if (!targetJs.includes(j)) targetJs.push(j);
+              if (foundOverlapZ === null) foundOverlapZ = zB; // BUG FIX: Lock the floor so we don't keep searching underneath the manual boundary!
+              continue; // Linked explicitly, we don't need to check overlap.
+          }
+
+          // Target condition 2: Geographic Overlap (only lock to the mathematically NEXT overlapping Z-level)
+          // If we already found an overlapping layer at a higher Z, we don't stitch THROUGH it to a deeper layer!
+          if (foundOverlapZ !== null && Math.abs(zB - foundOverlapZ) > 0.001) {
+              continue; 
+          }
+
+          const lineB_cand = rawDataSegments[j];
+          const boxB = new THREE.Box3().setFromPoints(lineB_cand);
+          boxB.expandByVector(expandFactor);
+          const overlapXY = !(boxA.max.x < boxB.min.x || boxA.min.x > boxB.max.x ||
+                              boxA.max.y < boxB.min.y || boxA.min.y > boxB.max.y);
+
+          if (overlapXY) {
+              // BUG FIX: Bounding boxes can overlap across a giant empty valley (forming a U/L shape).
+              // We must perform a TRUE proximity check to ensure this is actually the hill right underneath us,
+              // and not a separate structure across the map whose giant bounding box merely overlaps!
+              let currentMin = Infinity;
+              const stepA = Math.max(1, Math.floor(lineA.length / 20)); 
+              const stepB = Math.max(1, Math.floor(lineB_cand.length / 20));
+              
+              for(let a = 0; a < lineA.length; a += stepA) {
+                  for(let b = 0; b < lineB_cand.length; b += stepB) {
+                      const dist = Math.hypot(lineA[a].x - lineB_cand[b].x, lineA[a].y - lineB_cand[b].y);
+                      if (dist < currentMin) currentMin = dist;
+                  }
+              }
+
+              // Since the Z-levels strictly step down, true topographic neighbors should be nearly stacked in X/Y.
+              // If the minimum distance is large (e.g. across a valley), reject it!
+              // console.log(`Evaluating Layer ${i} -> Layer ${j} | Bounds Overlap: YES | Physical currentMin: ${currentMin.toFixed(2)}`);
+
+              if (currentMin < 150.0) { // Set to a safe topological drop distance
+                  
+                  // DEBUG VISUALIZATION (Disabled for normal usage)
+                  /*
+                  const debugLineMat = new THREE.LineDashedMaterial({ color: 0xff0000, dashSize: 2, gapSize: 2, linewidth: 2, depthTest: false, depthWrite: false });
+                  const debugLineGeom = new THREE.BufferGeometry().setFromPoints([lineA[0], lineB_cand[0]]);
+                  const debugRay = new THREE.Line(debugLineGeom, debugLineMat);
+                  debugRay.computeLineDistances();
+                  debugRay.renderOrder = 9999;
+                  meshGroup.add(debugRay);
+                  */
+
+                  if (!targetJs.includes(j)) targetJs.push(j);
+                  if (foundOverlapZ === null) foundOverlapZ = zB; // Lock it in!
+              }
+          }
       }
+
+      if (targetJs.length === 0) continue; // Top of the mountain, nothing below it
 
       // 3. Now loop over EVERY valid target layer we discovered and stitch exactly to them!
       for (let targetJ of targetJs) {

@@ -107,6 +107,14 @@ function initThreeJS() {
 }
 
 function handleNewPoints(arrayOfLineSegments) {
+  // Sort the lines topologically by their Z height so algorithms that walk the layers (like the Mesher)
+  // don't get completely confused if the JSON file has elements randomly out-of-order!
+  arrayOfLineSegments.sort((a, b) => {
+      if (!a.length || !b.length) return 0;
+      // Sort descending (top to bottom) or ascending (bottom to top)
+      return b[0].z - a[0].z; 
+  });
+
   // Store globally so the Fast Stitch / CGAL buttons can access the data
   rawDataSegments.length = 0;
   rawDataSegments.push(...arrayOfLineSegments);
@@ -125,9 +133,19 @@ function handleNewPoints(arrayOfLineSegments) {
     // Create a distinctive color that pops for each line using HSL (Hue, Saturation, Lightness)
     // By dividing the current index by the total length, we sweep cleanly across the full rainbow
     const hue = (index / arrayOfLineSegments.length) * 360; 
-    const layerMaterial = new THREE.LineBasicMaterial({
-      color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`) // 100% saturation, 65% lightness to pop against dark backgrounds
-    });
+    let layerMaterial;
+    
+    // If it's a boundary line, we make it bold and white so it heavily stands out
+    if (segmentArray.isBoundary) {
+      layerMaterial = new THREE.LineBasicMaterial({
+         color: 0xffffff,
+         linewidth: 3 // Note: WebGL usually clamps this to 1 on Windows, but the color change will be stark
+      });
+    } else {
+      layerMaterial = new THREE.LineBasicMaterial({
+        color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`) // 100% saturation, 65% lightness
+      });
+    }
 
     // Create an independent geometry for exactly this block of points
     const newGeom = new THREE.BufferGeometry().setFromPoints(segmentArray);
