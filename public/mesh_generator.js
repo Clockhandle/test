@@ -22,29 +22,52 @@ export function setupMesher(scene, rawDataSegments) {
     
     console.log('Total Layers to stitch:', rawDataSegments.length);
 
+    // Extract boundaries upfront (boundaries are stored as chains of 1 line, where [0].isBoundary is true)
+    const boundaries = [];
+    const chainsToMesh = [];
+    for (let c = 0; c < rawDataSegments.length; c++) {
+        if (rawDataSegments[c].length > 0 && rawDataSegments[c][0].isBoundary) {
+            boundaries.push(rawDataSegments[c][0]); // It's just a single boundary curve
+        } else {
+            chainsToMesh.push(rawDataSegments[c]); // It's a topological hill/ravine chain
+        }
+    }
+
     const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff });
 
     let stitchedCount = 0;
-    for (let i = 0; i < rawDataSegments.length - 1; i++) {
-      let lineA = rawDataSegments[i];
-      const zA = lineA[0].z;
+    let MAX_DEBUG_LAYERS = 100; // Hard limit for debugging
 
-      // --- DYNAMIC VERTICAL TOPOLOGY FIX ---
-      // Find valid partners either by geographic overlap (on the earliest valid Z level below)
-      // OR by explicit user-drawn boundaries (which bypass strict Z-level grouping).
-      let targetJs = [];
-      let foundOverlapZ = null;
+    // Iterate through each discrete Hill structure (chain)
+    for (let c = 0; c < chainsToMesh.length; c++) {
+      const hillChain = chainsToMesh[c];
 
-      const boxA = new THREE.Box3().setFromPoints(lineA);
-      const expandFactor = new THREE.Vector3(5, 5, 0); 
-      boxA.expandByVector(expandFactor);
+      for (let i = 0; i < hillChain.length - 1; i++) {
+        if (stitchedCount >= MAX_DEBUG_LAYERS) {
+          console.log(`Stopping early at ${MAX_DEBUG_LAYERS} layers for debugging.`);
+          break;
+        }
+        
+        let lineA = hillChain[i];
+        if (lineA.isBoundary) continue; 
 
-      for (let j = i + 1; j < rawDataSegments.length; j++) {
-          const zB = rawDataSegments[j][0].z;
-          if (Math.abs(zB - zA) < 0.001) continue;
+        const zA = lineA[0].z;
 
-          // Target condition 1: User EXPLICITLY drew a boundary connecting these two! Override distance out-of-the-box.
-          let explicitlyLinked = false;
+        let targetJs = [];
+        let foundOverlapZ = null;
+
+        const boxA = new THREE.Box3().setFromPoints(lineA);
+        const expandFactor = new THREE.Vector3(5, 5, 0); 
+        boxA.expandByVector(expandFactor);
+
+        for (let j = i + 1; j < hillChain.length; j++) {
+            const lineB_cand = hillChain[j];
+            if (lineB_cand.isBoundary) continue;
+
+            const zB = lineB_cand[0].z;
+            if (zB >= zA - 0.001) continue;
+
+            let explicitlyLinked = false;
           if (getDrawnPoints().length >= 4) {
               for (let p = 0; p < getDrawnPoints().length; p += 4) {
                   if (p + 3 >= getDrawnPoints().length) break;
@@ -72,7 +95,6 @@ export function setupMesher(scene, rawDataSegments) {
               continue; 
           }
 
-          const lineB_cand = rawDataSegments[j];
           const boxB = new THREE.Box3().setFromPoints(lineB_cand);
           boxB.expandByVector(expandFactor);
           const overlapXY = !(boxA.max.x < boxB.min.x || boxA.min.x > boxB.max.x ||
@@ -97,7 +119,7 @@ export function setupMesher(scene, rawDataSegments) {
               // If the minimum distance is large (e.g. across a valley), reject it!
               // console.log(`Evaluating Layer ${i} -> Layer ${j} | Bounds Overlap: YES | Physical currentMin: ${currentMin.toFixed(2)}`);
 
-              if (currentMin < 150.0) { // Set to a safe topological drop distance
+              if (currentMin < 150.0) { // Keep reasonable drop distance to prevent cross-valley linking but avoid holes
                   
                   // DEBUG VISUALIZATION (Disabled for normal usage)
                   /*
@@ -119,11 +141,11 @@ export function setupMesher(scene, rawDataSegments) {
 
       // 3. Now loop over EVERY valid target layer we discovered and stitch exactly to them!
       for (let targetJ of targetJs) {
-        let lineB = rawDataSegments[targetJ];
+        let lineB = hillChain[targetJ];
       
         console.log(`Stitching layer ${i} to dynamically found layer ${targetJ}...`);
         
-        const hue = (i / (rawDataSegments.length - 1)) * 360; 
+        const hue = (i / (hillChain.length - 1)) * 360; 
         const material = new THREE.MeshBasicMaterial({ 
           color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`), 
           side: THREE.DoubleSide, 
@@ -223,7 +245,7 @@ export function setupMesher(scene, rawDataSegments) {
             if (boundsA.minIdx !== Infinity && boundsB.minIdx !== Infinity && boundsA.minIdx !== boundsA.maxIdx && boundsB.minIdx !== boundsB.maxIdx) {
               const slicedLineA = lineA.slice(boundsA.minIdx, boundsA.maxIdx + 1);
               const slicedLineB = lineB.slice(boundsB.minIdx, boundsB.maxIdx + 1);
-              const stitchGeom = uniformStitch(slicedLineA, slicedLineB, 20.0);
+              const stitchGeom = uniformStitch(slicedLineA, slicedLineB, 20.0, boundaries);
               
               if (stitchGeom) {
                 const mesh = new THREE.Mesh(stitchGeom, material);
@@ -238,7 +260,7 @@ export function setupMesher(scene, rawDataSegments) {
         
         // If NO boundaries were drawn specifically over this pair of layers, just stitch the whole lines!
         if (!hasActiveBoundary) {
-          const stitchGeom = uniformStitch(lineA, lineB, 20.0);
+          const stitchGeom = uniformStitch(lineA, lineB, 20.0, boundaries);
           
           if (stitchGeom && stitchGeom.userData && stitchGeom.userData.debugRungs) {
               const rungsGeometry = new THREE.BufferGeometry();
@@ -267,7 +289,8 @@ export function setupMesher(scene, rawDataSegments) {
           }
         }
       } // END OF 'for (let targetJ of targetJs)' loop
-    } // END OF 'for (let i = 0...)' loop
+      } // END OF hill chains I loop
+    } // END OF 'chains array' loop
 
     if (stitchedCount > 0) {
       console.log(`Successfully added ${stitchedCount} multi-level mesh strips.`);

@@ -106,18 +106,10 @@ function initThreeJS() {
   animate();
 }
 
-function handleNewPoints(arrayOfLineSegments) {
-  // Sort the lines topologically by their Z height so algorithms that walk the layers (like the Mesher)
-  // don't get completely confused if the JSON file has elements randomly out-of-order!
-  arrayOfLineSegments.sort((a, b) => {
-      if (!a.length || !b.length) return 0;
-      // Sort descending (top to bottom) or ascending (bottom to top)
-      return b[0].z - a[0].z; 
-  });
-
-  // Store globally so the Fast Stitch / CGAL buttons can access the data
+function handleNewPoints(arrayOfChains) {
+  // Store globally so the Fast Stitch / CGAL buttons can access the grouped data
   rawDataSegments.length = 0;
-  rawDataSegments.push(...arrayOfLineSegments);
+  rawDataSegments.push(...arrayOfChains);
 
   // Clear out ANY old lines/points inside the group
   meshGroup.clear();
@@ -127,12 +119,15 @@ function handleNewPoints(arrayOfLineSegments) {
 
   const centerBox = new THREE.Box3(); // To calculate total bounds
 
+  // Flatten for rendering only
+  const allSegmentsFlat = arrayOfChains.flat();
+
   // 2. Loop through each independent array of points (each layer/segment)
-  arrayOfLineSegments.forEach((segmentArray, index) => {
+  allSegmentsFlat.forEach((segmentArray, index) => {
     
     // Create a distinctive color that pops for each line using HSL (Hue, Saturation, Lightness)
     // By dividing the current index by the total length, we sweep cleanly across the full rainbow
-    const hue = (index / arrayOfLineSegments.length) * 360; 
+    const hue = (index / allSegmentsFlat.length) * 360; 
     let layerMaterial;
     
     // If it's a boundary line, we make it bold and white so it heavily stands out

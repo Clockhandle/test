@@ -85,8 +85,40 @@ export function stitchLines(line1, line2) {
  * and injecting intermediate mid-points to enforce a maximum triangle edge length.
  * This completely fixes the "long/skewed triangles" problem by subdividing the space.
  */
-export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
+export function uniformStitch(line1, line2, maxEdgeLength = 20.0, globalBoundaries = []) {
   if (line1.length < 2 || line2.length < 2) return null;
+
+  // --- OVERHANG CLIPPING (Anti-Fan Fix) ---
+  // If one curve physically extends way past the other geographically, 
+  // the dynamic programming MUST fan all the leftover points to the final vertex.
+  // We stop this by cleanly snipping off the "tails" of the longer curves before stitching.
+  function trimOverhang(sourceLine, targetLine, thresholdXY) {
+      let startIdx = 0;
+      let endIdx = sourceLine.length - 1;
+      
+      const distToLineXY = (pt, line) => {
+          let minDist = Infinity;
+          for (let p of line) { 
+              let d = Math.hypot(pt.x - p.x, pt.y - p.y); 
+              if (d < minDist) minDist = d; 
+          }
+          return minDist;
+      };
+
+      while (startIdx < sourceLine.length - 2 && distToLineXY(sourceLine[startIdx], targetLine) > thresholdXY) {
+          startIdx++;
+      }
+      while (endIdx > 1 && distToLineXY(sourceLine[endIdx], targetLine) > thresholdXY) {
+          endIdx--;
+      }
+      
+      if (startIdx >= endIdx) return sourceLine; // Failsafe
+      return sourceLine.slice(startIdx, endIdx + 1);
+  }
+
+  // Clip tails that stray more than a tight limit horizontally from the paired level
+  const trimmedL1 = trimOverhang(line1, line2, 150.0);
+  const trimmedL2 = trimOverhang(line2, line1, 150.0);
 
   // 1. Subdivide the lines horizontally so no segment is longer than maxEdgeLength.
   // This physically preserves your drawn shapes while giving us enough vertices to build a uniform grid.
@@ -104,9 +136,9 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
     return result;
   }
 
-  const denseLine1 = subdivideLine(line1, maxEdgeLength);
-  const denseLine2Fwd = subdivideLine(line2, maxEdgeLength);
-  const denseLine2Rev = subdivideLine([...line2].reverse(), maxEdgeLength);
+  const denseLine1 = subdivideLine(trimmedL1, maxEdgeLength);
+  const denseLine2Fwd = subdivideLine(trimmedL2, maxEdgeLength);
+  const denseLine2Rev = subdivideLine([...trimmedL2].reverse(), maxEdgeLength);
 
   // 2. Dynamic Programming (Fuchs-Kedem-Uselton algorithm)
   // Evaluates every single possible matching combination between the curves 
@@ -196,7 +228,8 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
     const vT = v / vSteps;
     const currentLine = [];
     for (let k = 0; k < bestPairs.length; k++) {
-        currentLine.push(new THREE.Vector3().lerpVectors(bestPairs[k].p1, bestPairs[k].p2, vT));
+        let pt = new THREE.Vector3().lerpVectors(bestPairs[k].p1, bestPairs[k].p2, vT);
+        currentLine.push(pt);
     }
     grid.push(currentLine);
   }
@@ -223,6 +256,7 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
 
         // Ensure we aren't creating degenerate (0-area) triangles which can happen 
         // during fanning stages on the zipper.
+        // Also: PREVENT MASSIVE SKIRTS by simply dropping any triangle that stretches too far.
         
         // Triangle 1: p0, p3, p2
         const D1 = p0.distanceTo(p3);
@@ -231,7 +265,16 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const S1 = (D1 + D2 + D3) / 2;
         const Area1 = Math.sqrt(Math.max(0, S1 * (S1 - D1) * (S1 - D2) * (S1 - D3)));
         
-        if (Area1 > 0.0001) {
+        // Let's also check the actual original distance between the rung points to drop the sail!
+        const trueSpanA = bestPairs[c].p1.distanceTo(bestPairs[c].p2);
+        const trueSpanB = bestPairs[c+1].p1.distanceTo(bestPairs[c+1].p2);
+        const MAX_CROSS_DISTANCE = 1000.0; // Increased significantly to prevent boundary gaps
+        const centerX1 = (p0.x + p3.x + p2.x) / 3;
+        const centerY1 = (p0.y + p3.y + p2.y) / 3;
+        const insideBoundary1 = isInsideAnyBoundary(centerX1, centerY1, globalBoundaries);
+
+        // Temporarily removing the insideBoundary1 cookie-cutter check to fix edge holes
+        if (Area1 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
               vertexOffset + rowLen + c + 1,
@@ -245,8 +288,12 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const dc = p3.distanceTo(p0);
         const S2 = (da + db + dc) / 2;
         const Area2 = Math.sqrt(Math.max(0, S2 * (S2 - da) * (S2 - db) * (S2 - dc)));
-        
-        if (Area2 > 0.0001) {
+        const centerX2 = (p0.x + p1.x + p3.x) / 3;
+        const centerY2 = (p0.y + p1.y + p3.y) / 3;
+        const insideBoundary2 = isInsideAnyBoundary(centerX2, centerY2, globalBoundaries);
+
+        // Temporarily removing the insideBoundary2 cookie-cutter check to fix edge holes
+        if (Area2 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
               vertexOffset + c + 1,
@@ -264,10 +311,37 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
 
   const debugRungVerts = [];
   for (let p of bestPairs) {
-      debugRungVerts.push(p.p1.x, p.p1.y, p.p1.z);
-      debugRungVerts.push(p.p2.x, p.p2.y, p.p2.z);
+      if (p.p1.distanceTo(p.p2) < 150.0) { // Highlight the valid connections only
+          debugRungVerts.push(p.p1.x, p.p1.y, p.p1.z);
+          debugRungVerts.push(p.p2.x, p.p2.y, p.p2.z);
+      }
   }
   geometry.userData = { debugRungs: debugRungVerts };
 
   return geometry;
+}
+
+// Helper function to determine if a given coordinate is strictly inside the bounds of the global boundary polygons
+function isInsideAnyBoundary(x, y, boundaries) {
+  if (!boundaries || boundaries.length === 0) return true; // If no boundaries exist, everything is valid
+
+  let insideAny = false;
+  for (let poly of boundaries) {
+    let inside = false;
+    // Safely skip empty boundaries or degenerate arrays
+    if (!poly || poly.length < 3) continue;
+
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y;
+      const xj = poly[j].x, yj = poly[j].y;
+      const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    // Ray-casting algorithm returns true if the point falls inside the 2D polygon
+    if (inside) {
+        insideAny = true;
+        break; // 1 boundary is enough
+    } 
+  }
+  return insideAny;
 }
