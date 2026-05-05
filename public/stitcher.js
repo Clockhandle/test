@@ -85,7 +85,7 @@ export function stitchLines(line1, line2) {
  * and injecting intermediate mid-points to enforce a maximum triangle edge length.
  * This completely fixes the "long/skewed triangles" problem by subdividing the space.
  */
-export function uniformStitch(line1, line2, maxEdgeLength = 20.0, globalBoundaries = []) {
+export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   if (line1.length < 2 || line2.length < 2) return null;
 
   // --- OVERHANG CLIPPING (Anti-Fan Fix) ---
@@ -269,11 +269,8 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0, globalBoundari
         const trueSpanA = bestPairs[c].p1.distanceTo(bestPairs[c].p2);
         const trueSpanB = bestPairs[c+1].p1.distanceTo(bestPairs[c+1].p2);
         const MAX_CROSS_DISTANCE = 1000.0; // Increased significantly to prevent boundary gaps
-        const centerX1 = (p0.x + p3.x + p2.x) / 3;
-        const centerY1 = (p0.y + p3.y + p2.y) / 3;
-        const insideBoundary1 = isInsideAnyBoundary(centerX1, centerY1, globalBoundaries);
 
-        // Temporarily removing the insideBoundary1 cookie-cutter check to fix edge holes
+        // Add Triangle 1
         if (Area1 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
@@ -288,11 +285,8 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0, globalBoundari
         const dc = p3.distanceTo(p0);
         const S2 = (da + db + dc) / 2;
         const Area2 = Math.sqrt(Math.max(0, S2 * (S2 - da) * (S2 - db) * (S2 - dc)));
-        const centerX2 = (p0.x + p1.x + p3.x) / 3;
-        const centerY2 = (p0.y + p1.y + p3.y) / 3;
-        const insideBoundary2 = isInsideAnyBoundary(centerX2, centerY2, globalBoundaries);
 
-        // Temporarily removing the insideBoundary2 cookie-cutter check to fix edge holes
+        // Add Triangle 2
         if (Area2 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
@@ -319,29 +313,4 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0, globalBoundari
   geometry.userData = { debugRungs: debugRungVerts };
 
   return geometry;
-}
-
-// Helper function to determine if a given coordinate is strictly inside the bounds of the global boundary polygons
-function isInsideAnyBoundary(x, y, boundaries) {
-  if (!boundaries || boundaries.length === 0) return true; // If no boundaries exist, everything is valid
-
-  let insideAny = false;
-  for (let poly of boundaries) {
-    let inside = false;
-    // Safely skip empty boundaries or degenerate arrays
-    if (!poly || poly.length < 3) continue;
-
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const xi = poly[i].x, yi = poly[i].y;
-      const xj = poly[j].x, yj = poly[j].y;
-      const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
-    }
-    // Ray-casting algorithm returns true if the point falls inside the 2D polygon
-    if (inside) {
-        insideAny = true;
-        break; // 1 boundary is enough
-    } 
-  }
-  return insideAny;
 }

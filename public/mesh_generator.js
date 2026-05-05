@@ -245,7 +245,7 @@ export function setupMesher(scene, rawDataSegments) {
             if (boundsA.minIdx !== Infinity && boundsB.minIdx !== Infinity && boundsA.minIdx !== boundsA.maxIdx && boundsB.minIdx !== boundsB.maxIdx) {
               const slicedLineA = lineA.slice(boundsA.minIdx, boundsA.maxIdx + 1);
               const slicedLineB = lineB.slice(boundsB.minIdx, boundsB.maxIdx + 1);
-              const stitchGeom = uniformStitch(slicedLineA, slicedLineB, 20.0, boundaries);
+              const stitchGeom = uniformStitch(slicedLineA, slicedLineB, 20.0);
               
               if (stitchGeom) {
                 const mesh = new THREE.Mesh(stitchGeom, material);
@@ -260,7 +260,7 @@ export function setupMesher(scene, rawDataSegments) {
         
         // If NO boundaries were drawn specifically over this pair of layers, just stitch the whole lines!
         if (!hasActiveBoundary) {
-          const stitchGeom = uniformStitch(lineA, lineB, 20.0, boundaries);
+          const stitchGeom = uniformStitch(lineA, lineB, 20.0);
           
           if (stitchGeom && stitchGeom.userData && stitchGeom.userData.debugRungs) {
               const rungsGeometry = new THREE.BufferGeometry();
