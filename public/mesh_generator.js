@@ -2,6 +2,27 @@ import * as THREE from 'three';
 import { uniformStitch } from './stitcher.js';
 import { getDrawnPoints } from './boundary_drawer.js';
 
+// ---- BLACKLIST: Layer pairs that should NEVER be stitched together ----
+// Add new pairs here as [layerA, layerB]. Order doesn't matter.
+// A forbidden pair is also a "search floor": once layer i hits a forbidden
+// candidate j, the descent stops there (we don't keep walking deeper).
+const FORBIDDEN_STITCH_PAIRS = [
+  [51, 53],
+  [46, 49],
+  [45, 49],
+  [45, 51], // observed sail (maxRung=861); only one candidate so auto-filter can't help
+  [46, 51], // observed sail (maxRung=929); only one candidate so auto-filter can't help
+  [3, 5],
+];
+
+// Build a fast lookup set for O(1) checks
+const _forbiddenSet = new Set(
+  FORBIDDEN_STITCH_PAIRS.flatMap(([a, b]) => [`${a}|${b}`, `${b}|${a}`])
+);
+function isForbiddenPair(i, j) {
+  return _forbiddenSet.has(`${i}|${j}`);
+}
+
 export function setupMesher(scene, rawDataSegments) {
   const stitchBtn = document.getElementById('stitch-mesh-btn');
   if (!stitchBtn) return;
@@ -53,7 +74,7 @@ export function setupMesher(scene, rawDataSegments) {
 
         const zA = lineA[0].z;
 
-        let targetJs = [];
+        let targetJs = []; // each entry: { j, currentMin }
         let foundOverlapZ = null;
 
         const boxA = new THREE.Box3().setFromPoints(lineA);
@@ -63,6 +84,15 @@ export function setupMesher(scene, rawDataSegments) {
         for (let j = i + 1; j < hillChain.length; j++) {
             const lineB_cand = hillChain[j];
             if (lineB_cand.isBoundary) continue;
+
+            // Skip explicitly-blacklisted layer pairs (see FORBIDDEN_STITCH_PAIRS at top of file).
+            // Important: also lock foundOverlapZ to this layer so we don't keep walking
+            // deeper and accidentally pick a far-away layer instead. A forbidden pair
+            // is a hard floor, not just an invisible layer.
+            if (isForbiddenPair(i, j)) {
+                if (foundOverlapZ === null) foundOverlapZ = lineB_cand[0].z;
+                continue;
+            }
 
             const zB = lineB_cand[0].z;
             if (zB >= zA - 0.001) continue;
@@ -84,7 +114,7 @@ export function setupMesher(scene, rawDataSegments) {
           }
 
           if (explicitlyLinked) {
-              if (!targetJs.includes(j)) targetJs.push(j);
+              if (!targetJs.some(t => t.j === j)) targetJs.push({ j, currentMin: 0 });
               if (foundOverlapZ === null) foundOverlapZ = zB; // BUG FIX: Lock the floor so we don't keep searching underneath the manual boundary!
               continue; // Linked explicitly, we don't need to check overlap.
           }
@@ -131,7 +161,7 @@ export function setupMesher(scene, rawDataSegments) {
                   meshGroup.add(debugRay);
                   */
 
-                  if (!targetJs.includes(j)) targetJs.push(j);
+                  if (!targetJs.some(t => t.j === j)) targetJs.push({ j, currentMin });
                   if (foundOverlapZ === null) foundOverlapZ = zB; // Lock it in!
               }
           }
@@ -139,8 +169,29 @@ export function setupMesher(scene, rawDataSegments) {
 
       if (targetJs.length === 0) continue; // Top of the mountain, nothing below it
 
+      // ---- ROBUST Y-BRANCH FILTER ----
+      // When several candidates pass the proximity gate at the same locked Z, the
+      // truly stacked neighbor will have a much smaller currentMin than rivals on
+      // a parallel ridge. Keep only candidates within RATIO of the best, and only
+      // if they're absolutely close (ABS_GATE) — otherwise the parallel-ridge
+      // match (e.g. ~150 vs the real one's ~20) is rejected automatically.
+      // Explicit user-drawn links use currentMin=0 so they always survive.
+      if (targetJs.length > 1) {
+        const PARALLEL_RIDGE_RATIO = 2.5; // candidate must be within 2.5x of best
+        const PARALLEL_RIDGE_ABS = 60.0;  // and absolutely under 60 units
+        const bestMin = Math.min(...targetJs.map(t => t.currentMin));
+        const before = targetJs.length;
+        targetJs = targetJs.filter(t =>
+          t.currentMin <= bestMin * PARALLEL_RIDGE_RATIO ||
+          t.currentMin <= PARALLEL_RIDGE_ABS
+        );
+        if (targetJs.length !== before) {
+          console.log(`  layer ${i}: pruned ${before - targetJs.length}/${before} candidates (bestMin=${bestMin.toFixed(1)})`);
+        }
+      }
+
       // 3. Now loop over EVERY valid target layer we discovered and stitch exactly to them!
-      for (let targetJ of targetJs) {
+      for (let { j: targetJ } of targetJs) {
         let lineB = hillChain[targetJ];
       
         console.log(`Stitching layer ${i} to dynamically found layer ${targetJ}...`);
@@ -152,6 +203,28 @@ export function setupMesher(scene, rawDataSegments) {
           transparent: true,
           opacity: 0.6 
         });
+
+        // Helper: attach yellow debug rungs from a stitch geometry, tagged with the layer pair.
+        const addDebugRungs = (stitchGeom, pairLabel) => {
+          if (!stitchGeom || !stitchGeom.userData || !stitchGeom.userData.debugRungs) return;
+          const ud = stitchGeom.userData;
+          console.log(
+            `  pair ${pairLabel} | rungs=${ud.pairCount} maxRung=${ud.maxRung?.toFixed(1)} ` +
+            `maxLateralA=${ud.maxLateralA?.toFixed(1)} maxLateralB=${ud.maxLateralB?.toFixed(1)}`
+          );
+          const rungsGeometry = new THREE.BufferGeometry();
+          rungsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(ud.debugRungs, 3));
+          const rungsMaterial = new THREE.LineBasicMaterial({
+            color: 0xffff00,
+            linewidth: 2,
+            depthTest: false,
+            depthWrite: false,
+          });
+          const debugMesh = new THREE.LineSegments(rungsGeometry, rungsMaterial);
+          debugMesh.renderOrder = 999;
+          debugMesh.userData.layerPair = pairLabel; // hover tooltip shows obj index — at least logged
+          meshGroup.add(debugMesh);
+        };
 
         // --- BOUNDARY CONSTRAINT LOGIC ---
         let hasActiveBoundary = false;
@@ -252,6 +325,7 @@ export function setupMesher(scene, rawDataSegments) {
                 meshGroup.add(mesh);
                 const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(stitchGeom), wireMat);
                 mesh.add(wireframe);
+                addDebugRungs(stitchGeom, `${i}->${targetJ} (bounded)`);
                 stitchedCount++;
               }
             }
@@ -261,30 +335,16 @@ export function setupMesher(scene, rawDataSegments) {
         // If NO boundaries were drawn specifically over this pair of layers, just stitch the whole lines!
         if (!hasActiveBoundary) {
           const stitchGeom = uniformStitch(lineA, lineB, 20.0);
-          
-          if (stitchGeom && stitchGeom.userData && stitchGeom.userData.debugRungs) {
-              const rungsGeometry = new THREE.BufferGeometry();
-              rungsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(stitchGeom.userData.debugRungs, 3));
-              // Disable depth testing so the lines render ON TOP of everything, and make them bright yellow
-              const rungsMaterial = new THREE.LineBasicMaterial({ 
-                  color: 0xffff00, 
-                  linewidth: 3,
-                  depthTest: false,
-                  depthWrite: false
-              }); 
-              const debugMesh = new THREE.LineSegments(rungsGeometry, rungsMaterial);
-              debugMesh.renderOrder = 999;
-              meshGroup.add(debugMesh);
-          }
 
           if (stitchGeom) {
             const mesh = new THREE.Mesh(stitchGeom, material);
             meshGroup.add(mesh);
-            
+
             // TEMPORARILY DISABLED WHITE WIREFRAME FOR DEBUGGING VISIBILITY
             // const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(stitchGeom), wireMat);
             // mesh.add(wireframe);
-            
+
+            addDebugRungs(stitchGeom, `${i}->${targetJ}`);
             stitchedCount++;
           }
         }

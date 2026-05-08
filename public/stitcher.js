@@ -212,7 +212,25 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   const fwdResult = getDPZipper(denseLine1, denseLine2Fwd);
   const revResult = getDPZipper(denseLine1, denseLine2Rev);
 
-  const bestPairs = (revResult.totalCost < fwdResult.totalCost) ? revResult.pairs : fwdResult.pairs;
+  const rawBestPairs = (revResult.totalCost < fwdResult.totalCost) ? revResult.pairs : fwdResult.pairs;
+
+  // 3b. FAN COLLAPSE (Fix A): When the DP path is forced to take a long run of
+  // "advance only L1" or "advance only L2" moves (because one curve is longer
+  // or extends past the other), many consecutive pairs share the same p1 (or p2).
+  // Lerping those produces a triangle fan radiating from the shared pivot —
+  // the giant flat sail seen in stitched output. Drop adjacent duplicates so
+  // the mesh terminates cleanly instead of fanning.
+  const bestPairs = [];
+  for (let k = 0; k < rawBestPairs.length; k++) {
+      const cur = rawBestPairs[k];
+      const prev = bestPairs[bestPairs.length - 1];
+      if (prev && (prev.p1 === cur.p1 || prev.p2 === cur.p2)) {
+          // Same pivot as previous rung — would create a fan triangle. Skip.
+          continue;
+      }
+      bestPairs.push(cur);
+  }
+  if (bestPairs.length < 2) return null;
 
   // 4. Determine uniform Vertical Steps based on max ladder distance
   let maxVDist = 0;
@@ -248,11 +266,19 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
     for (let c = 0; c < rowB.length; c++) allVertices.push(rowB[c].x, rowB[c].y, rowB[c].z);
 
     const rowLen = rowA.length;
+    // Fix B: any lateral (within-row) edge that blows past maxEdgeLength is a
+    // sign the DP fanned across a gap — drop those triangles instead of
+    // letting them sweep across the surface.
+    const MAX_LATERAL_EDGE = maxEdgeLength * 3.0;
     for (let c = 0; c < rowLen - 1; c++) {
         const p0 = rowA[c];
         const p1 = rowA[c + 1];
         const p2 = rowB[c];
         const p3 = rowB[c + 1];
+
+        const lateralA = p0.distanceTo(p1); // top edge
+        const lateralB = p2.distanceTo(p3); // bottom edge
+        const lateralBlowup = lateralA > MAX_LATERAL_EDGE || lateralB > MAX_LATERAL_EDGE;
 
         // Ensure we aren't creating degenerate (0-area) triangles which can happen 
         // during fanning stages on the zipper.
@@ -271,7 +297,7 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const MAX_CROSS_DISTANCE = 1000.0; // Increased significantly to prevent boundary gaps
 
         // Add Triangle 1
-        if (Area1 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
+        if (!lateralBlowup && Area1 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
               vertexOffset + rowLen + c + 1,
@@ -287,7 +313,7 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const Area2 = Math.sqrt(Math.max(0, S2 * (S2 - da) * (S2 - db) * (S2 - dc)));
 
         // Add Triangle 2
-        if (Area2 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
+        if (!lateralBlowup && Area2 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
               vertexOffset + c + 1,
@@ -303,14 +329,33 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   geometry.setIndex(allIndices);
   geometry.computeVertexNormals();
 
+  // Compute diagnostic stats so callers can log/visualize stitches per pair.
+  let maxRung = 0, maxLateralA = 0, maxLateralB = 0;
+  for (let k = 0; k < bestPairs.length; k++) {
+    const d = bestPairs[k].p1.distanceTo(bestPairs[k].p2);
+    if (d > maxRung) maxRung = d;
+    if (k > 0) {
+      const dla = bestPairs[k - 1].p1.distanceTo(bestPairs[k].p1);
+      const dlb = bestPairs[k - 1].p2.distanceTo(bestPairs[k].p2);
+      if (dla > maxLateralA) maxLateralA = dla;
+      if (dlb > maxLateralB) maxLateralB = dlb;
+    }
+  }
+
+  // Always include rung positions (no length filter) so we can visually
+  // diagnose runaway stitches. The filter previously hid the worst offenders.
   const debugRungVerts = [];
   for (let p of bestPairs) {
-      if (p.p1.distanceTo(p.p2) < 150.0) { // Highlight the valid connections only
-          debugRungVerts.push(p.p1.x, p.p1.y, p.p1.z);
-          debugRungVerts.push(p.p2.x, p.p2.y, p.p2.z);
-      }
+      debugRungVerts.push(p.p1.x, p.p1.y, p.p1.z);
+      debugRungVerts.push(p.p2.x, p.p2.y, p.p2.z);
   }
-  geometry.userData = { debugRungs: debugRungVerts };
+  geometry.userData = {
+    debugRungs: debugRungVerts,
+    maxRung,
+    maxLateralA,
+    maxLateralB,
+    pairCount: bestPairs.length,
+  };
 
   return geometry;
 }
