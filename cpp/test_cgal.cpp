@@ -29,17 +29,6 @@ int main() {
     DT dt;
     dt.insert(pts.begin(), pts.end());
 
-    // Assign indices to finite vertices.
-    std::vector<Point> verts;
-    verts.reserve(dt.number_of_vertices());
-    int next_id = 0;
-    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
-        vit->info(); // touch (unused; default Delaunay_triangulation_2 has no info)
-        verts.push_back(vit->point());
-        // Stash index in handle via a separate map below instead of vertex info.
-        (void)next_id++;
-    }
-
     // Build a vertex-handle -> index map (default DT2 vertices don't carry user data).
     std::ostringstream verts_json;
     verts_json << "[";

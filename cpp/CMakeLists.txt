@@ -15,3 +15,6 @@ find_package(CGAL CONFIG REQUIRED)
 
 add_executable(cgal_test test_cgal.cpp)
 target_link_libraries(cgal_test PRIVATE CGAL::CGAL)
+
+add_executable(mesh_gen mesh_gen.cpp)
+target_link_libraries(mesh_gen PRIVATE CGAL::CGAL)

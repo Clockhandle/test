@@ -27,6 +27,11 @@
     <button id="draw-boundary-btn" style="margin-left: 10px;">Draw Boundary (Off)</button>
     <button id="export-cgal-btn" style="margin-left: 10px; background: #007bff; color: white;">Export For CGAL</button>
     <button id="stitch-mesh-btn" style="margin-left: 10px; background: #28a745; color: white;">Fast Stitch</button>
+    <button id="cgal-mesh-btn" style="margin-left: 10px; background: #6f42c1; color: white;">CGAL Mesh</button>
+    <input id="cgal-alpha" type="number" step="0.1" placeholder="alpha (auto)" style="margin-left: 6px; width: 110px;" />
+    <input id="cgal-slope" type="number" step="0.1" placeholder="slope (5.0)" style="margin-left: 6px; width: 100px;" />
+    <input id="cgal-bridge-step" type="number" step="0.1" placeholder="bridge step (auto)" style="margin-left: 6px; width: 130px;" />
+    <input id="cgal-bridge-neighbors" type="number" step="1" min="0" placeholder="bridge nbrs (2)" style="margin-left: 6px; width: 120px;" />
   </div>
   <canvas id="three-canvas"></canvas>
 </body>

@@ -6,6 +6,7 @@ import { setupAxisHelper, renderAxisHelper } from './axis_helper.js';
 import { setupBoundaryDrawer, getDrawnPoints, clearBoundaries } from './boundary_drawer.js';
 import { setupCameraMovement, updateCameraMovement } from './camera_movement.js';
 import { setupMesher } from './mesh_generator.js';
+import { buildCgalMesh } from './cgal_mesher.js';
 
 let geometry, camera, line, scene, meshGroup
 const rawDataSegments = []; // Keep a reference to the untouched original lines
@@ -54,6 +55,28 @@ function initThreeJS() {
 
   // ----- FAST Z-LAYER STITCHING LOGIC -----
   setupMesher(scene, rawDataSegments);
+  // -------------------------------
+
+  // ----- CGAL MESH BUTTON -----
+  const cgalBtn = document.getElementById('cgal-mesh-btn');
+  if (cgalBtn) {
+    cgalBtn.addEventListener('click', () => {
+      const alphaInput   = document.getElementById('cgal-alpha');
+      const slopeInput   = document.getElementById('cgal-slope');
+      const bridgeStepInput      = document.getElementById('cgal-bridge-step');
+      const bridgeNeighborsInput = document.getElementById('cgal-bridge-neighbors');
+      const alphaVal   = alphaInput   && alphaInput.value   ? Number(alphaInput.value)   : null;
+      const slopeVal   = slopeInput   && slopeInput.value   ? Number(slopeInput.value)   : null;
+      const bridgeStepVal      = bridgeStepInput      && bridgeStepInput.value      !== '' ? Number(bridgeStepInput.value)      : null;
+      const bridgeNeighborsVal = bridgeNeighborsInput && bridgeNeighborsInput.value !== '' ? Number(bridgeNeighborsInput.value) : null;
+      const opts = {};
+      if (Number.isFinite(alphaVal)   && alphaVal   > 0) opts.alpha   = alphaVal;
+      if (Number.isFinite(slopeVal)   && slopeVal   > 0) opts.slope   = slopeVal;
+      if (Number.isFinite(bridgeStepVal)      && bridgeStepVal      > 0)  opts.bridge_step      = bridgeStepVal;
+      if (Number.isFinite(bridgeNeighborsVal) && bridgeNeighborsVal >= 0) opts.bridge_neighbors = bridgeNeighborsVal;
+      buildCgalMesh(rawDataSegments, meshGroup, opts);
+    });
+  }
   // -------------------------------
 
 // Material
