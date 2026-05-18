@@ -35,7 +35,17 @@ export async function setupFileInput(onDataLoaded) {
                           : null;
 
         meshItem.FlattenedVertices.forEach(vertex => {
+          const x = vertex[0];
+          const y = vertex[1];
           const z = vertex[2];
+
+          // ── DEBUG OFFSET (remove when done testing) ──────────────────
+          // Shift Trụ 50 units down so Vách and Trụ surfaces are visually
+          // separated and easy to verify independently before volume work.
+          const debugX = featureType === 'tru' ? x - 0 : x;
+          const debugY = featureType === 'tru' ? y - 0 : y;
+          const debugZ = featureType === 'tru' ? z - 0 : z;
+          // ─────────────────────────────────────────────────────────────
           
           // If the Z value changes, start a new line segment (UNLESS it's a boundary line, which is allowed to be 3D!)
           if (!isBoundary && currentZ !== null && currentZ !== z) {
@@ -47,7 +57,7 @@ export async function setupFileInput(onDataLoaded) {
             currentSegment = [];
           }
 
-          currentSegment.push(new THREE.Vector3(vertex[0], vertex[1], z));
+          currentSegment.push(new THREE.Vector3(debugX, debugY, debugZ));
           currentZ = z;
         });
         

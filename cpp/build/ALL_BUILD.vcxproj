@@ -174,10 +174,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </ProjectReference>
-    <ProjectReference Include="D:\New_Cgal_test_site\cpp\build\cgal_test.vcxproj">
-      <Project>{2D7876FC-5EBE-3544-BAEA-6201E3B11569}</Project>
-      <Name>cgal_test</Name>
-    </ProjectReference>
     <ProjectReference Include="D:\New_Cgal_test_site\cpp\build\mesh_gen.vcxproj">
       <Project>{958E6C40-870C-3A62-9C06-C6722D080F31}</Project>
       <Name>mesh_gen</Name>

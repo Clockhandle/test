@@ -1,6 +1,6 @@
 ^D:\NEW_CGAL_TEST_SITE\CPP\BUILD\CMAKEFILES\4425BD657D42A735AFC6C03307076D0C\GENERATE.STAMP.RULE
 setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -SD:/New_Cgal_test_site/cpp -BD:/New_Cgal_test_site/cpp/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/New_Cgal_test_site/cpp/build/cgal_test.sln
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/New_Cgal_test_site/cpp -BD:/New_Cgal_test_site/cpp/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/New_Cgal_test_site/cpp/build/mesh_gen.sln
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

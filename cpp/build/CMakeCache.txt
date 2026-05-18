@@ -131,7 +131,7 @@ CMAKE_PROJECT_DESCRIPTION:STATIC=
 CMAKE_PROJECT_HOMEPAGE_URL:STATIC=
 
 //Value Computed by CMake
-CMAKE_PROJECT_NAME:STATIC=cgal_test
+CMAKE_PROJECT_NAME:STATIC=mesh_gen
 
 //RC compiler
 CMAKE_RC_COMPILER:FILEPATH=rc
@@ -293,6 +293,15 @@ cgal_test_IS_TOP_LEVEL:STATIC=ON
 
 //Value Computed by CMake
 cgal_test_SOURCE_DIR:STATIC=D:/New_Cgal_test_site/cpp
+
+//Value Computed by CMake
+mesh_gen_BINARY_DIR:STATIC=D:/New_Cgal_test_site/cpp/build
+
+//Value Computed by CMake
+mesh_gen_IS_TOP_LEVEL:STATIC=ON
+
+//Value Computed by CMake
+mesh_gen_SOURCE_DIR:STATIC=D:/New_Cgal_test_site/cpp
 
 
 ########################

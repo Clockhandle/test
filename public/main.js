@@ -7,6 +7,7 @@ import { setupBoundaryDrawer, getDrawnPoints, clearBoundaries } from './boundary
 import { setupCameraMovement, updateCameraMovement } from './camera_movement.js';
 import { setupMesher } from './mesh_generator.js';
 import { buildCgalMesh } from './cgal_mesher.js';
+import { buildViaSolid, computeViaSolidVolumes } from './via_solid.js';
 import { setupTypeToggles } from './type_toggles.js';
 
 let geometry, camera, line, scene, meshGroup
@@ -68,6 +69,15 @@ function initThreeJS() {
       if (Number.isFinite(slopeVal) && slopeVal >= 0) opts.slope = slopeVal;
       buildCgalMesh(rawDataSegments, meshGroup, opts);
     });
+  }
+  // ----- VIA SOLID BUTTON -----
+  const viaSolidBtn = document.getElementById('via-solid-btn');
+  if (viaSolidBtn) {
+    viaSolidBtn.addEventListener('click', () => buildViaSolid(meshGroup));
+  }
+  const viaVolumeBtn = document.getElementById('via-volume-btn');
+  if (viaVolumeBtn) {
+    viaVolumeBtn.addEventListener('click', () => computeViaSolidVolumes(meshGroup));
   }
   // -------------------------------
 
