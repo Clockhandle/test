@@ -27,6 +27,13 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === '3D Polyline' || 
                            meshItem.Type === 'Boundary';
 
+        // Normalise the Type string to a simple ASCII key for featureType.
+        const rawType = (meshItem.Type || '').normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const featureType = rawType.includes('vach') ? 'vach'
+                          : rawType.includes('tru')  ? 'tru'
+                          : null;
+
         meshItem.FlattenedVertices.forEach(vertex => {
           const z = vertex[2];
           
@@ -34,6 +41,7 @@ export async function setupFileInput(onDataLoaded) {
           if (!isBoundary && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
               currentSegment.isBoundary = false;
+              currentSegment.featureType = featureType;
               lineSegments.push(currentSegment);
             }
             currentSegment = [];
@@ -45,6 +53,7 @@ export async function setupFileInput(onDataLoaded) {
         
         if (currentSegment.length > 0) {
           currentSegment.isBoundary = isBoundary;
+          currentSegment.featureType = featureType;
           lineSegments.push(currentSegment);
         }
       });

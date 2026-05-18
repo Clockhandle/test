@@ -28,10 +28,11 @@
     <button id="export-cgal-btn" style="margin-left: 10px; background: #007bff; color: white;">Export For CGAL</button>
     <button id="stitch-mesh-btn" style="margin-left: 10px; background: #28a745; color: white;">Fast Stitch</button>
     <button id="cgal-mesh-btn" style="margin-left: 10px; background: #6f42c1; color: white;">CGAL Mesh</button>
-    <input id="cgal-alpha" type="number" step="0.1" placeholder="alpha (auto)" style="margin-left: 6px; width: 110px;" />
-    <input id="cgal-slope" type="number" step="0.1" placeholder="slope (5.0)" style="margin-left: 6px; width: 100px;" />
-    <input id="cgal-bridge-step" type="number" step="0.1" placeholder="bridge step (auto)" style="margin-left: 6px; width: 130px;" />
-    <input id="cgal-bridge-neighbors" type="number" step="1" min="0" placeholder="bridge nbrs (2)" style="margin-left: 6px; width: 120px;" />
+    <input id="cgal-slope" type="number" step="0.5" min="0" placeholder="slope (5.0)" style="margin-left: 6px; width: 110px;" />
+    <span style="margin-left: 14px; border-left: 1px solid #555; padding-left: 14px;">
+      <button id="toggle-vach-btn" style="background: #17a2b8; color: white;">Vách: On</button>
+      <button id="toggle-tru-btn" style="margin-left: 6px; background: #fd7e14; color: white;">Trụ: On</button>
+    </span>
   </div>
   <canvas id="three-canvas"></canvas>
 </body>

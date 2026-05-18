@@ -1,12 +1,9 @@
-// /api/mesh handler — spawns the compiled CGAL mesh generator.
+// /api/mesh handler — spawns the CDT mesh generator.
 //
 // POST JSON body: {
 //   polylines:  [[[x,y,z], ...], ...],   // open contour lines
 //   boundaries: [[[x,y,z], ...], ...],   // closed boundary loops (required)
-//   alpha?:            number,
-//   slope?:            number,
-//   bridge_step?:      number,
-//   bridge_neighbors?: number,
+//   slope?: number,   // max (delta_z / XY_edge) kept (default 5.0; 0 = no filter)
 // }
 // Response: JSON emitted verbatim by cpp/build/Release/mesh_gen.exe
 //
@@ -77,17 +74,8 @@ export function createMeshHandler(rootDir) {
                 return;
             }
         }
-        if (typeof body.alpha === 'number' && body.alpha > 0) {
-            lines.push(`ALPHA ${body.alpha}`);
-        }
-        if (typeof body.slope === 'number' && body.slope > 0) {
+        if (typeof body.slope === 'number' && body.slope >= 0) {
             lines.push(`SLOPE ${body.slope}`);
-        }
-        if (typeof body.bridge_step === 'number' && body.bridge_step > 0) {
-            lines.push(`BRIDGE_STEP ${body.bridge_step}`);
-        }
-        if (typeof body.bridge_neighbors === 'number' && body.bridge_neighbors >= 0) {
-            lines.push(`BRIDGE_NEIGHBORS ${Math.floor(body.bridge_neighbors)}`);
         }
         const stdinPayload = lines.join('\n') + '\n';
 

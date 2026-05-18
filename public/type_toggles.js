@@ -47,13 +47,18 @@ export function setupTypeToggles(scene) {
     apply();
   });
 
-  // Re-apply after Stitch (so newly added meshes obey the current toggle state).
-  // Listen to clicks on the stitch button and apply on the next tick.
+  // Re-apply after Stitch / CGAL mesh so newly added objects obey current state.
   const stitchBtn = document.getElementById('stitch-mesh-btn');
   if (stitchBtn) {
-    stitchBtn.addEventListener('click', () => {
-      // setTimeout 0 so we run AFTER the stitch handler has added its meshes.
-      setTimeout(apply, 0);
+    stitchBtn.addEventListener('click', () => { setTimeout(apply, 0); });
+  }
+  const cgalBtn = document.getElementById('cgal-mesh-btn');
+  if (cgalBtn) {
+    // CGAL mesh is async; poll briefly until the new group appears.
+    cgalBtn.addEventListener('click', () => {
+      let attempts = 0;
+      const poll = () => { apply(); if (++attempts < 20) setTimeout(poll, 250); };
+      setTimeout(poll, 500);
     });
   }
 

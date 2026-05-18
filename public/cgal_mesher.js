@@ -10,10 +10,7 @@ let cgalGroup = null;
  * @param {Array<Array<THREE.Vector3>>} rawDataSegments
  * @param {THREE.Group} meshGroup
  * @param {Object} [opts]
- * @param {number} [opts.alpha]              Max XY edge length kept (per boundary).
- * @param {number} [opts.slope]              Max (zmax-zmin) / longest_xy_edge per triangle (anti-spike).
- * @param {number} [opts.bridge_step]        Bridge densification spacing (per boundary; <=0 = auto).
- * @param {number} [opts.bridge_neighbors]   Number of nearest sibling lines bridged per contour (0 disables).
+ * @param {number} [opts.slope]  Max (delta_z / XY_edge) kept. Default 5.0; 0 = no filter.
  */
 export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     if (!rawDataSegments || rawDataSegments.length === 0) {
@@ -21,70 +18,68 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         return;
     }
 
-    const polylines  = [];
-    const boundaries = [];
+    // Group segments by featureType so each type is meshed in complete isolation.
+    // A Vách contour will never influence the Trụ CDT and vice versa.
+    const groups = new Map();  // featureType-key -> { featureType, polylines[], boundaries[] }
     for (const seg of rawDataSegments) {
         if (!seg || seg.length === 0) continue;
-        const poly = new Array(seg.length);
-        for (let i = 0; i < seg.length; ++i) {
-            const v = seg[i];
-            poly[i] = [v.x, v.y, v.z];
+        const key = seg.featureType || '__other__';
+        if (!groups.has(key)) {
+            groups.set(key, { featureType: seg.featureType || null, polylines: [], boundaries: [] });
         }
-        if (seg.isBoundary) boundaries.push(poly);
-        else                polylines.push(poly);
+        const g = groups.get(key);
+        const poly = seg.map(v => [v.x, v.y, v.z]);
+        if (seg.isBoundary) g.boundaries.push(poly);
+        else                g.polylines.push(poly);
     }
-    if (boundaries.length === 0) {
+
+    const meshableGroups = [...groups.values()].filter(g => g.boundaries.length > 0);
+    if (meshableGroups.length === 0) {
         alert('No IsBoundary loops found in the data. Boundary lines are required — mesh generation is confined to the inside of each boundary.');
         return;
     }
 
-    const payload = { polylines, boundaries };
-    if (typeof opts.alpha === 'number' && opts.alpha > 0) payload.alpha = opts.alpha;
-    if (typeof opts.slope === 'number' && opts.slope > 0) payload.slope = opts.slope;
-    if (typeof opts.bridge_step      === 'number' && opts.bridge_step      > 0) payload.bridge_step      = opts.bridge_step;
-    if (typeof opts.bridge_neighbors === 'number' && opts.bridge_neighbors >= 0) payload.bridge_neighbors = opts.bridge_neighbors;
-
     const t0 = performance.now();
-    let resp;
+    let results;
     try {
-        resp = await fetch('/api/mesh', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
+        results = await Promise.all(meshableGroups.map(async g => {
+            const payload = { polylines: g.polylines, boundaries: g.boundaries };
+            if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
+            const resp = await fetch('/api/mesh', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.ok) throw new Error(data.error || resp.statusText);
+            return { data, featureType: g.featureType };
+        }));
     } catch (e) {
         console.error('CGAL mesh request failed:', e);
-        alert('Network error reaching /api/mesh: ' + e.message);
+        alert('CGAL mesh failed: ' + e.message);
         return;
     }
-    const data = await resp.json();
     const dt = performance.now() - t0;
 
-    if (!resp.ok || !data.ok) {
-        console.error('CGAL mesh error:', data);
-        alert('CGAL mesh failed: ' + (data.error || resp.statusText));
-        return;
-    }
-
-    console.log('[CGAL]', {
-        contours: data.num_contours,
-        boundaries: data.num_boundaries,
-        orphan_contours: data.num_orphan_contours,
-        input_vertices: data.num_input_vertices,
-        meshes: data.num_meshes,
-        slope_used: data.slope_used,
-        bridge_neighbors: data.bridge_neighbors,
-        server_ms: data.elapsed_ms,
-        roundtrip_ms: Math.round(dt),
+    results.forEach(({ data, featureType }) => {
+        console.log(`[CGAL-CDT] featureType=${featureType}`, {
+            contours: data.num_contours,
+            boundaries: data.num_boundaries,
+            orphan_contours: data.num_orphan_contours,
+            meshes: data.num_meshes,
+            elapsed_ms: data.elapsed_ms,
+        });
+        (data.meshes || []).forEach((m, i) => {
+            console.log(`  boundary ${i}: ${m.num_contours} contours, ${m.num_vertices} verts, ${m.num_triangles} tris (dropped_slope=${m.dropped_slope}, slope_threshold=${m.slope_used})`);
+        });
     });
-    data.meshes.forEach((m, i) => {
-        console.log(`  boundary ${i}: ${m.num_contours} contours, ${m.boundary_vertices} boundary verts, ${m.num_vertices} mesh verts (${m.bridge_points} bridge + ${m.steiner_inserted} Steiner), ${m.num_triangles} tris (alpha=${m.alpha_used.toFixed(2)}, bridge_step=${m.bridge_step_used.toFixed(2)}, dropped_outside=${m.dropped_outside}, dropped_slope=${m.dropped_slope})`);
-    });
+    console.log(`[CGAL-CDT] total roundtrip ${Math.round(dt)} ms`);
 
-    renderMeshes(data, meshGroup);
+    renderMeshes(results, meshGroup);
 }
 
-function renderMeshes(data, meshGroup) {
+// results: Array<{ data, featureType }>
+function renderMeshes(results, meshGroup) {
     if (cgalGroup) {
         cgalGroup.traverse(o => {
             if (o.geometry) o.geometry.dispose();
@@ -96,51 +91,59 @@ function renderMeshes(data, meshGroup) {
     cgalGroup.name = 'CGAL_Meshes';
     meshGroup.add(cgalGroup);
 
-    const n = data.meshes.length || 1;
-    data.meshes.forEach((m, i) => {
-        if (!m.triangles || m.triangles.length === 0) return;
+    const totalMeshes = results.reduce((s, r) => s + (r.data.meshes?.length || 0), 0) || 1;
+    let globalIndex = 0;
 
-        const positions = new Float32Array(m.vertices.length * 3);
-        for (let v = 0; v < m.vertices.length; ++v) {
-            positions[v * 3 + 0] = m.vertices[v][0];
-            positions[v * 3 + 1] = m.vertices[v][1];
-            positions[v * 3 + 2] = m.vertices[v][2];
-        }
-        const indices = new Uint32Array(m.triangles.length * 3);
-        for (let t = 0; t < m.triangles.length; ++t) {
-            indices[t * 3 + 0] = m.triangles[t][0];
-            indices[t * 3 + 1] = m.triangles[t][1];
-            indices[t * 3 + 2] = m.triangles[t][2];
-        }
+    for (const { data, featureType } of results) {
+        (data.meshes || []).forEach(m => {
+            if (!m.triangles || m.triangles.length === 0) { globalIndex++; return; }
 
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geom.setIndex(new THREE.BufferAttribute(indices, 1));
-        geom.computeVertexNormals();
-        geom.computeBoundingBox();
-        geom.computeBoundingSphere();
+            const positions = new Float32Array(m.vertices.length * 3);
+            for (let v = 0; v < m.vertices.length; ++v) {
+                positions[v * 3 + 0] = m.vertices[v][0];
+                positions[v * 3 + 1] = m.vertices[v][1];
+                positions[v * 3 + 2] = m.vertices[v][2];
+            }
+            const indices = new Uint32Array(m.triangles.length * 3);
+            for (let t = 0; t < m.triangles.length; ++t) {
+                indices[t * 3 + 0] = m.triangles[t][0];
+                indices[t * 3 + 1] = m.triangles[t][1];
+                indices[t * 3 + 2] = m.triangles[t][2];
+            }
 
-        const hue = (i / n) * 360;
-        const color = new THREE.Color(`hsl(${Math.floor(hue)}, 70%, 55%)`);
-        const mat = new THREE.MeshStandardMaterial({
-            color,
-            side: THREE.DoubleSide,
-            flatShading: true,
-            roughness: 0.9,
-            metalness: 0.0,
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geom.setIndex(new THREE.BufferAttribute(indices, 1));
+            geom.computeVertexNormals();
+            geom.computeBoundingBox();
+            geom.computeBoundingSphere();
+
+            const hue = (globalIndex / totalMeshes) * 360;
+            const color = new THREE.Color(`hsl(${Math.floor(hue)}, 70%, 55%)`);
+            const mat = new THREE.MeshStandardMaterial({
+                color,
+                side: THREE.DoubleSide,
+                flatShading: true,
+                roughness: 0.9,
+                metalness: 0.0,
+            });
+            const mesh = new THREE.Mesh(geom, mat);
+            mesh.name = `CGAL_Mesh_${globalIndex}`;
+            mesh.userData.clusterIndex = globalIndex;
+            mesh.userData.alphaUsed    = m.alpha_used;
+            if (featureType) mesh.userData.featureType = featureType;
+            cgalGroup.add(mesh);
+
+            const wireGeom = new THREE.WireframeGeometry(geom);
+            const wireMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 });
+            const wire = new THREE.LineSegments(wireGeom, wireMat);
+            wire.name = `CGAL_Mesh_${globalIndex}_Wire`;
+            if (featureType) wire.userData.featureType = featureType;
+            mesh.add(wire);
+
+            globalIndex++;
         });
-        const mesh = new THREE.Mesh(geom, mat);
-        mesh.name = `CGAL_Mesh_${i}`;
-        mesh.userData.clusterIndex = i;
-        mesh.userData.alphaUsed    = m.alpha_used;
-        cgalGroup.add(mesh);
-
-        const wireGeom = new THREE.WireframeGeometry(geom);
-        const wireMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 });
-        const wire = new THREE.LineSegments(wireGeom, wireMat);
-        wire.name = `CGAL_Mesh_${i}_Wire`;
-        mesh.add(wire);
-    });
+    }
 
     ensureLights(meshGroup);
 }
