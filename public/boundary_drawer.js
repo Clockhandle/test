@@ -58,17 +58,14 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
       }
   });
 
-  // Handle mouse movement for snapping
+  // Handle mouse movement for snapping and tooltip
   window.addEventListener('pointermove', (event) => {
-      if (!isDrawing || !snapSphere) return;
+      const tooltip = document.getElementById('hover-tooltip');
 
       mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
       mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
-
-      // Make the threshold dynamic based on how far zoomed out the camera is!  
-      // This makes it MUCH easier to hover over thin lines.
       raycaster.params.Line.threshold = camera.position.z * 0.01;
 
       const intersects = raycaster.intersectObject(meshGroup, true);
@@ -76,6 +73,23 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
       if (intersects.length > 0) {
         const intersect = intersects[0];
         let targetPoint = intersect.point;
+
+        const layerIndex = meshGroup.children.indexOf(intersect.object);
+
+        // Update Tooltip (always, even when not in draw mode)
+        if (tooltip) {
+          tooltip.style.display = 'block';
+          tooltip.style.left = event.clientX + 15 + 'px';
+          tooltip.style.top = event.clientY + 15 + 'px';
+          let zValue = targetPoint.z;
+          if (intersect.object.type === 'Line') {
+            const positions = intersect.object.geometry.attributes.position;
+            if (positions.count > 0) zValue = positions.getZ(0);
+          }
+          tooltip.innerHTML = `<strong>Layer:</strong> ${layerIndex}<br/><strong>Z-Elevation:</strong> ${zValue.toFixed(3)}`;
+        }
+
+        if (!isDrawing || !snapSphere) return; // Only process snapping if drawing is active
 
         // "Snap" to the absolute closest mathematical vertex rather than just anywhere on the line
         if (intersect.object.type === 'Line' && intersect.index !== undefined) {
@@ -95,7 +109,7 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
           
           // PERFECT TOPOLOGY FIX: Store exactly which layer and vertex index we snapped to
           snapSphere.userData = {
-             layerIndex: meshGroup.children.indexOf(intersect.object),
+             layerIndex: layerIndex,
              vertexIndex: isP1 ? intersect.index : intersect.index + 1
           };
         }
@@ -107,7 +121,8 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
         snapSphere.visible = true;
 
       } else {
-        snapSphere.visible = false;
+        if (tooltip) tooltip.style.display = 'none';
+        if (snapSphere) snapSphere.visible = false;
       }
 
       // If we are holding click & dragging, update the dashed line

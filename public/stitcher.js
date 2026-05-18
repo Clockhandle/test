@@ -88,6 +88,29 @@ export function stitchLines(line1, line2) {
 export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   if (line1.length < 2 || line2.length < 2) return null;
 
+  // --- OVERHANG CLIPPING (Anti-Fan Fix) ---
+  // If one curve physically extends way past the other geographically,
+  // we stop fans by snipping off the "tails" of the longer curve before stitching.
+  function trimOverhang(sourceLine, targetLine, thresholdXY) {
+    let startIdx = 0;
+    let endIdx = sourceLine.length - 1;
+    const distToLineXY = (pt, line) => {
+      let minDist = Infinity;
+      for (const p of line) {
+        const d = Math.hypot(pt.x - p.x, pt.y - p.y);
+        if (d < minDist) minDist = d;
+      }
+      return minDist;
+    };
+    while (startIdx < sourceLine.length - 2 && distToLineXY(sourceLine[startIdx], targetLine) > thresholdXY) startIdx++;
+    while (endIdx > 1 && distToLineXY(sourceLine[endIdx], targetLine) > thresholdXY) endIdx--;
+    if (startIdx >= endIdx) return sourceLine;
+    return sourceLine.slice(startIdx, endIdx + 1);
+  }
+
+  const trimmedL1 = trimOverhang(line1, line2, 150.0);
+  const trimmedL2 = trimOverhang(line2, line1, 150.0);
+
   // 1. Subdivide the lines horizontally so no segment is longer than maxEdgeLength.
   // This physically preserves your drawn shapes while giving us enough vertices to build a uniform grid.
   function subdivideLine(line, maxEdge) {
@@ -104,9 +127,9 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
     return result;
   }
 
-  const denseLine1 = subdivideLine(line1, maxEdgeLength);
-  const denseLine2Fwd = subdivideLine(line2, maxEdgeLength);
-  const denseLine2Rev = subdivideLine([...line2].reverse(), maxEdgeLength);
+  const denseLine1 = subdivideLine(trimmedL1, maxEdgeLength);
+  const denseLine2Fwd = subdivideLine(trimmedL2, maxEdgeLength);
+  const denseLine2Rev = subdivideLine([...trimmedL2].reverse(), maxEdgeLength);
 
   // 2. Dynamic Programming (Fuchs-Kedem-Uselton algorithm)
   // Evaluates every single possible matching combination between the curves 
@@ -221,17 +244,21 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const p2 = rowB[c];
         const p3 = rowB[c + 1];
 
-        // Ensure we aren't creating degenerate (0-area) triangles which can happen 
+        // Ensure we aren't creating degenerate (0-area) triangles which can happen
         // during fanning stages on the zipper.
-        
+        // Also: PREVENT MASSIVE SKIRTS by dropping any triangle that stretches too far.
+        const trueSpanA = bestPairs[c].p1.distanceTo(bestPairs[c].p2);
+        const trueSpanB = bestPairs[c + 1].p1.distanceTo(bestPairs[c + 1].p2);
+        const MAX_CROSS_DISTANCE = 1000.0;
+
         // Triangle 1: p0, p3, p2
         const D1 = p0.distanceTo(p3);
         const D2 = p3.distanceTo(p2);
         const D3 = p2.distanceTo(p0);
         const S1 = (D1 + D2 + D3) / 2;
         const Area1 = Math.sqrt(Math.max(0, S1 * (S1 - D1) * (S1 - D2) * (S1 - D3)));
-        
-        if (Area1 > 0.0001) {
+
+        if (Area1 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
               vertexOffset + rowLen + c + 1,
@@ -245,8 +272,8 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
         const dc = p3.distanceTo(p0);
         const S2 = (da + db + dc) / 2;
         const Area2 = Math.sqrt(Math.max(0, S2 * (S2 - da) * (S2 - db) * (S2 - dc)));
-        
-        if (Area2 > 0.0001) {
+
+        if (Area2 > 0.0001 && trueSpanA < MAX_CROSS_DISTANCE && trueSpanB < MAX_CROSS_DISTANCE) {
             allIndices.push(
               vertexOffset + c,
               vertexOffset + c + 1,
@@ -263,9 +290,11 @@ export function uniformStitch(line1, line2, maxEdgeLength = 20.0) {
   geometry.computeVertexNormals();
 
   const debugRungVerts = [];
-  for (let p of bestPairs) {
+  for (const p of bestPairs) {
+    if (p.p1.distanceTo(p.p2) < 150.0) { // only highlight valid (non-sail) connections
       debugRungVerts.push(p.p1.x, p.p1.y, p.p1.z);
       debugRungVerts.push(p.p2.x, p.p2.y, p.p2.z);
+    }
   }
   geometry.userData = { debugRungs: debugRungVerts };
 

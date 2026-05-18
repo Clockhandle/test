@@ -40,8 +40,10 @@ export function setupMesher(scene, rawDataSegments) {
       boxA.expandByVector(expandFactor);
 
       for (let j = i + 1; j < rawDataSegments.length; j++) {
-          const zB = rawDataSegments[j][0].z;
-          if (Math.abs(zB - zA) < 0.001) continue;
+          const lineB_cand = rawDataSegments[j];
+          if (lineB_cand.isBoundary) continue;
+          const zB = lineB_cand[0].z;
+          if (zB >= zA - 0.001) continue; // only look strictly downward in Z
 
           // Target condition 1: User EXPLICITLY drew a boundary connecting these two! Override distance out-of-the-box.
           let explicitlyLinked = false;
@@ -72,7 +74,6 @@ export function setupMesher(scene, rawDataSegments) {
               continue; 
           }
 
-          const lineB_cand = rawDataSegments[j];
           const boxB = new THREE.Box3().setFromPoints(lineB_cand);
           boxB.expandByVector(expandFactor);
           const overlapXY = !(boxA.max.x < boxB.min.x || boxA.min.x > boxB.max.x ||
