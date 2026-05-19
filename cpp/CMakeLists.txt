@@ -15,3 +15,7 @@ find_package(CGAL CONFIG REQUIRED)
 
 add_executable(mesh_gen mesh_gen.cpp)
 target_link_libraries(mesh_gen PRIVATE CGAL::CGAL)
+
+# Mesh clipping — uses CGAL::Polygon_mesh_processing::clip()
+add_executable(mesh_clip mesh_clip.cpp)
+target_link_libraries(mesh_clip PRIVATE CGAL::CGAL)

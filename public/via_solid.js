@@ -144,7 +144,11 @@ export function buildViaSolid(meshGroup) {
     console.log(`[Via Solid] Matched ${pairs.length} Vách↔Trụ pairs`);
 
     let stitchedCount = 0;
-    for (const { vach, tru, dist } of pairs) {
+    pairs.forEach(({ vach, tru, dist }, solidIdx) => {
+        // Tag the CGAL top/bottom meshes so the drag system can find related parts.
+        vach.userData.solidIndex = solidIdx;
+        tru.userData.solidIndex  = solidIdx;
+
         console.log(`  Pairing (XY centroid dist = ${dist.toFixed(1)})`);
 
         const vachLoops = extractBoundaryLoops(vach.userData.rawVertices, vach.userData.rawTriangles);
@@ -155,7 +159,7 @@ export function buildViaSolid(meshGroup) {
 
         if (vachLoops.length === 0 || truLoops.length === 0) {
             console.warn('    Skipping — no border loop extracted.');
-            continue;
+            return;
         }
 
         const vachLoop = longestLoop(vachLoops);
@@ -182,10 +186,11 @@ export function buildViaSolid(meshGroup) {
             });
             const sideMesh = new THREE.Mesh(sideGeom, mat);
             sideMesh.name  = `Via_SideWall_${stitchedCount}`;
+            sideMesh.userData.solidIndex = solidIdx;
             solidGroup.add(sideMesh);
             stitchedCount++;
         }
-    }
+    });
 
     console.log(`[Via Solid] Done — ${stitchedCount} side wall(s) built.`);
     if (stitchedCount === 0) alert('Side-wall stitching produced no geometry. Check console for details.');

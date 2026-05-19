@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createMeshHandler } from './mesh_endpoint.js';
+import { createClipHandler } from './mesh_clip_endpoint.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,8 +26,11 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// CGAL mesh generation endpoint. Browser POSTs polylines, gets back vertices+triangles.
+// CGAL mesh generation endpoint.
 app.post('/api/mesh', createMeshHandler(__dirname));
+
+// CGAL mesh clipping endpoint.
+app.post('/api/clip', createClipHandler(__dirname));
 
 app.listen(port, () => {
   console.log(`Vanilla JS Server up at http://localhost:${port}`);

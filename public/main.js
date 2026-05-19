@@ -8,6 +8,7 @@ import { setupCameraMovement, updateCameraMovement } from './camera_movement.js'
 import { setupMesher } from './mesh_generator.js';
 import { buildCgalMesh } from './cgal_mesher.js';
 import { buildViaSolid, computeViaSolidVolumes } from './via_solid.js';
+import { setupMeshCutter, enterCutMode, setupDragToMove } from './mesh_cutter.js';
 import { setupTypeToggles } from './type_toggles.js';
 
 let geometry, camera, line, scene, meshGroup
@@ -93,6 +94,13 @@ function initThreeJS() {
   // Initialize the boundary drawer module
   setupBoundaryDrawer(scene, camera, controls, meshGroup);
   setupTypeToggles(scene);
+
+  // ----- CUT + DRAG CONTROLS -----
+  setupMeshCutter(scene, camera, controls, meshGroup, renderer.domElement);
+  setupDragToMove(scene, camera, controls, meshGroup, renderer.domElement);
+  const cutBtn = document.getElementById('cut-btn');
+  if (cutBtn) cutBtn.addEventListener('click', enterCutMode);
+  // --------------------------------
 
 	const points = [];
 	points.push( new THREE.Vector3( - 5, -3, 0 ) );
