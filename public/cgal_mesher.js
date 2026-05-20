@@ -5,6 +5,27 @@
 import * as THREE from 'three';
 
 let cgalGroup = null;
+let pendingWarnings = [];  // accumulated across all feature groups from last mesh run
+
+function setupIssueExport() {
+    const btn = document.getElementById('export-issues-btn');
+    if (!btn || btn._wired) return;
+    btn._wired = true;
+    btn.addEventListener('click', () => {
+        if (pendingWarnings.length === 0) return;
+        const lines = ['Bad contour lines detected by CGAL mesh — fix these in CAD:\n'];
+        pendingWarnings.forEach(({ viaName, featureType, blockName, w }) => {
+            const type = w.boundary_idx === -1 ? 'ORPHAN' : `LEAKS (${w.outside_verts}/${w.total_verts} verts outside boundary)`;
+            lines.push(`${type}: line with z = ${w.first_vertex[2].toFixed(3)}  [via: ${viaName ?? '?'}, block: ${blockName ?? '?'}, type: ${featureType ?? 'unknown'}]`);
+        });
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'cgal_line_issues.txt';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
+}
 
 /**
  * @param {Array<Array<THREE.Vector3>>} rawDataSegments
@@ -18,19 +39,23 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         return;
     }
 
-    // Group segments by featureType so each type is meshed in complete isolation.
-    // A Vách contour will never influence the Trụ CDT and vice versa.
-    const groups = new Map();  // featureType-key -> { featureType, polylines[], boundaries[] }
+    // Group segments by viaName + blockName + featureType — the full 3-level tree.
+    // Vỉa 1 and Vỉa 2 must never share a mesh, same for different Khối within a Vỉa.
+    const groups = new Map();  // key -> { viaName, featureType, blockName, polylines[], boundaries[], holes[] }
     for (const seg of rawDataSegments) {
         if (!seg || seg.length === 0) continue;
-        const key = seg.featureType || '__other__';
+        const via  = seg.viaName     || '__default__';
+        const ft   = seg.featureType || '__other__';
+        const blk  = seg.blockName   || '__default__';
+        const key  = `${via}||${blk}||${ft}`;
         if (!groups.has(key)) {
-            groups.set(key, { featureType: seg.featureType || null, polylines: [], boundaries: [] });
+            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [] });
         }
         const g = groups.get(key);
         const poly = seg.map(v => [v.x, v.y, v.z]);
-        if (seg.isBoundary) g.boundaries.push(poly);
-        else                g.polylines.push(poly);
+        if (seg.isBoundary)    g.boundaries.push(poly);
+        else if (seg.isHole)   g.holes.push(poly);
+        else                   g.polylines.push(poly);
     }
 
     const meshableGroups = [...groups.values()].filter(g => g.boundaries.length > 0);
@@ -39,11 +64,15 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         return;
     }
 
+    setupIssueExport();
+    pendingWarnings = [];
+
     const t0 = performance.now();
     let results;
     try {
         results = await Promise.all(meshableGroups.map(async g => {
             const payload = { polylines: g.polylines, boundaries: g.boundaries };
+            if (g.holes.length > 0) payload.holes = g.holes;
             if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
             const resp = await fetch('/api/mesh', {
                 method: 'POST',
@@ -52,7 +81,7 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
             });
             const data = await resp.json();
             if (!resp.ok || !data.ok) throw new Error(data.error || resp.statusText);
-            return { data, featureType: g.featureType };
+            return { data, viaName: g.viaName, featureType: g.featureType, blockName: g.blockName };
         }));
     } catch (e) {
         console.error('CGAL mesh request failed:', e);
@@ -61,22 +90,56 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     }
     const dt = performance.now() - t0;
 
-    results.forEach(({ data, featureType }) => {
-        console.log(`[CGAL-CDT] featureType=${featureType}`, {
+    results.forEach(({ data, viaName, featureType, blockName }) => {
+        console.log(`[CGAL-CDT] via="${viaName}" featureType=${featureType} block="${blockName}"`,
+ {
             contours: data.num_contours,
             boundaries: data.num_boundaries,
             orphan_contours: data.num_orphan_contours,
             meshes: data.num_meshes,
+            warnings: data.num_warnings,
             elapsed_ms: data.elapsed_ms,
         });
         (data.meshes || []).forEach((m, i) => {
             console.log(`  boundary ${i}: ${m.num_contours} contours, ${m.num_vertices} verts, ${m.num_triangles} tris (dropped_slope=${m.dropped_slope}, slope_threshold=${m.slope_used})`);
         });
+
+        // Report bad contour lines so the data team can locate and fix them.
+        if (data.warnings && data.warnings.length > 0) {
+            console.warn(`[CGAL] ⚠ ${data.warnings.length} bad contour(s) in via="${viaName}" block="${blockName}" type="${featureType}":`);
+            data.warnings.forEach(w => {
+                const type = w.boundary_idx === -1 ? 'ORPHAN' : `LEAKS(${w.outside_verts}/${w.total_verts})`;
+                console.warn(`  ${type}  z=${w.first_vertex[2].toFixed(3)}`);
+                pendingWarnings.push({ viaName, featureType, blockName, w });
+            });
+        }
     });
     console.log(`[CGAL-CDT] total roundtrip ${Math.round(dt)} ms`);
+    const issueBtn = document.getElementById('export-issues-btn');
+    if (issueBtn) issueBtn.style.display = pendingWarnings.length > 0 ? '' : 'none';
 
     renderMeshes(results, meshGroup);
-    clampTruToVach(cgalGroup);
+
+    // Draw hole polygon outlines in white so they're visible in the scene.
+    for (const g of meshableGroups) {
+        for (const holePoly of g.holes) {
+            const pts = new Float32Array(holePoly.length * 3);
+            for (let i = 0; i < holePoly.length; i++) {
+                pts[i * 3 + 0] = holePoly[i][0];
+                pts[i * 3 + 1] = holePoly[i][1];
+                pts[i * 3 + 2] = holePoly[i][2];
+            }
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+            const mat = new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false });
+            const loop = new THREE.LineLoop(geom, mat);
+            loop.name = `Hole_${g.featureType}`;
+            loop.userData.featureType = g.featureType;
+            cgalGroup.add(loop);
+        }
+    }
+
+    //clampTruToVach(cgalGroup);
 }
 
 // results: Array<{ data, featureType }}
@@ -95,7 +158,7 @@ function renderMeshes(results, meshGroup) {
     const totalMeshes = results.reduce((s, r) => s + (r.data.meshes?.length || 0), 0) || 1;
     let globalIndex = 0;
 
-    for (const { data, featureType } of results) {
+    for (const { data, viaName, featureType, blockName } of results) {
         (data.meshes || []).forEach(m => {
             if (!m.triangles || m.triangles.length === 0) { globalIndex++; return; }
 
@@ -134,7 +197,9 @@ function renderMeshes(results, meshGroup) {
             mesh.userData.alphaUsed    = m.alpha_used;
             mesh.userData.rawVertices  = m.vertices;   // needed for border extraction
             mesh.userData.rawTriangles = m.triangles;  // needed for border extraction
+            if (viaName)     mesh.userData.viaName     = viaName;
             if (featureType) mesh.userData.featureType = featureType;
+            if (blockName)   mesh.userData.blockName   = blockName;
             cgalGroup.add(mesh);
 
             const wireGeom = new THREE.WireframeGeometry(geom);
@@ -193,12 +258,17 @@ function clampTruToVach(group) {
     truMeshes.forEach(truMesh => {
         truMesh.updateWorldMatrix(true, false);
 
-        // Nearest Vách by XY centroid (world space via Box3).
+        // Nearest Vách by XY centroid — only consider Vách meshes in the same
+        // viaName + blockName group so multi-block datasets don't cross-pair.
+        const truVia   = truMesh.userData.viaName;
+        const truBlock = truMesh.userData.blockName;
+
         const truBox    = new THREE.Box3().setFromObject(truMesh);
         const truCenter = truBox.getCenter(new THREE.Vector3());
 
         let bestVach = null, bestDist = Infinity;
         vachMeshes.forEach(v => {
+            if (v.userData.viaName !== truVia || v.userData.blockName !== truBlock) return;
             v.updateWorldMatrix(true, false);
             const vBox    = new THREE.Box3().setFromObject(v);
             const vCenter = vBox.getCenter(new THREE.Vector3());
@@ -272,18 +342,25 @@ function clampTruToVach(group) {
 
             totalBadCentroids++;
 
-            // Clamp all 3 vertices of this tent triangle.
+            // Pre-check: ALL 3 vertices must have a valid Vách hit before clamping
+            // anything. If even one vertex is under the hole (no hit), skip this
+            // triangle entirely — partial clamping would create new tent triangles.
             const tris = [[i0, waP], [i1, wbP], [i2, wcP]];
-            for (const [vi, wv] of tris) {
+            const vertHits = tris.map(([, wv]) => {
                 origin.set(wv.x, wv.y, wv.z - 5000);
                 raycaster.set(origin, UP);
-                const vHits = raycaster.intersectObject(bestVach, false);
-                if (vHits.length === 0) continue;
-                const worldVachZ = vHits[0].point.z;
+                const h = raycaster.intersectObject(bestVach, false);
+                return h.length > 0 ? h[0].point.z : null;
+            });
+            if (vertHits.some(z => z === null)) continue; // hole underneath — skip
+
+            for (let vi = 0; vi < tris.length; vi++) {
+                const [vertIdx, wv] = tris[vi];
+                const worldVachZ = vertHits[vi];
                 if (wv.z <= worldVachZ - 0.01) continue; // this vertex already fine
                 clampPt.set(wv.x, wv.y, worldVachZ - 0.01).applyMatrix4(mwi);
-                pos.setZ(vi, clampPt.z);
-                if (rawVerts && rawVerts[vi]) rawVerts[vi][2] = clampPt.z;
+                pos.setZ(vertIdx, clampPt.z);
+                if (rawVerts && rawVerts[vertIdx]) rawVerts[vertIdx][2] = clampPt.z;
                 totalClamped++;
             }
         }

@@ -39,6 +39,7 @@ export function createMeshHandler(rootDir) {
         const body = req.body || {};
         const polylines  = body.polylines  || [];
         const boundaries = body.boundaries || [];
+        const holes      = body.holes      || [];
         if (!Array.isArray(boundaries) || boundaries.length === 0) {
             res.status(400).json({ ok: false, error: 'Request body must include non-empty "boundaries" array (closed loops).' });
             return;
@@ -48,6 +49,7 @@ export function createMeshHandler(rootDir) {
         const lines = [];
         lines.push(`POLYLINES ${polylines.length}`);
         lines.push(`BOUNDARIES ${boundaries.length}`);
+        lines.push(`HOLES ${holes.length}`);
         let totalVerts = 0;
 
         const writePoly = (token, poly) => {
@@ -74,6 +76,12 @@ export function createMeshHandler(rootDir) {
                 return;
             }
         }
+        for (const poly of holes) {
+            if (!writePoly('HOLE', poly)) {
+                res.status(400).json({ ok: false, error: 'Non-finite vertex in holes.' });
+                return;
+            }
+        }
         if (typeof body.slope === 'number' && body.slope >= 0) {
             lines.push(`SLOPE ${body.slope}`);
         }
@@ -90,6 +98,7 @@ export function createMeshHandler(rootDir) {
         });
         child.on('close', code => {
             const elapsed_ms = Date.now() - t0;
+            if (stderr) console.warn('[mesh_gen stderr]', stderr);
             if (code !== 0) {
                 res.status(500).json({
                     ok: false,

@@ -26,6 +26,9 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === 'Polyline3d' || 
                            meshItem.Type === '3D Polyline' || 
                            meshItem.Type === 'Boundary';
+        const isHole = meshItem.IsHole === true;
+        const blockName = meshItem.BlockName || null;
+        const viaName   = meshItem.ViaName   || null;
 
         // Normalise the Type string to a simple ASCII key for featureType.
         const rawType = (meshItem.Type || '').normalize('NFD')
@@ -47,11 +50,14 @@ export async function setupFileInput(onDataLoaded) {
           const debugZ = featureType === 'tru' ? z - 0 : z;
           // ─────────────────────────────────────────────────────────────
           
-          // If the Z value changes, start a new line segment (UNLESS it's a boundary line, which is allowed to be 3D!)
-          if (!isBoundary && currentZ !== null && currentZ !== z) {
+          // If the Z value changes, start a new line segment
+          // (holes and boundaries are 3D closed loops — never split them)
+          if (!isBoundary && !isHole && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
               currentSegment.isBoundary = false;
               currentSegment.featureType = featureType;
+              currentSegment.blockName = blockName;
+              currentSegment.viaName   = viaName;
               lineSegments.push(currentSegment);
             }
             currentSegment = [];
@@ -63,7 +69,10 @@ export async function setupFileInput(onDataLoaded) {
         
         if (currentSegment.length > 0) {
           currentSegment.isBoundary = isBoundary;
+          currentSegment.isHole = isHole;
           currentSegment.featureType = featureType;
+          currentSegment.blockName = blockName;
+          currentSegment.viaName   = viaName;
           lineSegments.push(currentSegment);
         }
       });

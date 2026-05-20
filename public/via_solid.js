@@ -158,32 +158,73 @@ export function buildViaSolid(meshGroup) {
             continue;
         }
 
-        const vachLoop = longestLoop(vachLoops);
-        const truLoop  = longestLoop(truLoops);
+        // Sort loops longest-first: index 0 = outer perimeter, rest = inner hole loops.
+        const vachSorted = [...vachLoops].sort((a, b) => b.length - a.length);
+        const truSorted  = [...truLoops ].sort((a, b) => b.length - a.length);
 
-        drawDebugLoop(vachLoop, 0xff6600, solidGroup, 'Vach_Border');
-        drawDebugLoop(truLoop,  0x00ccff, solidGroup, 'Tru_Border');
+        const vachOuter = vachSorted[0];
+        const truOuter  = truSorted[0];
 
-        // Log whether each loop closed back to start
-        const vachClosed = isLoopClosed(vachLoop, vach.userData.rawVertices, vach.userData.rawTriangles);
-        const truClosed  = isLoopClosed(truLoop,  tru.userData.rawVertices,  tru.userData.rawTriangles);
-        console.log(`    Vách loop closed: ${vachClosed} (${vachLoop.length} verts)`);
-        console.log(`    Trụ  loop closed: ${truClosed}  (${truLoop.length} verts)`);
+        drawDebugLoop(vachOuter, 0xff6600, solidGroup, 'Vach_Border');
+        drawDebugLoop(truOuter,  0x00ccff, solidGroup, 'Tru_Border');
 
-        // ── Side-wall stitching ──────────────────────────────────────────
-        const sideGeom = stitchClosedLoops(vachLoop, truLoop);
-        if (sideGeom) {
-            const mat = new THREE.MeshStandardMaterial({
-                color: 0x888888,
-                side: THREE.DoubleSide,
-                flatShading: true,
-                roughness: 0.85,
-                metalness: 0.0,
-            });
-            const sideMesh = new THREE.Mesh(sideGeom, mat);
-            sideMesh.name  = `Via_SideWall_${stitchedCount}`;
-            solidGroup.add(sideMesh);
+        const vachClosed = isLoopClosed(vachOuter, vach.userData.rawVertices, vach.userData.rawTriangles);
+        const truClosed  = isLoopClosed(truOuter,  tru.userData.rawVertices,  tru.userData.rawTriangles);
+        console.log(`    Vách outer loop closed: ${vachClosed} (${vachOuter.length} verts)`);
+        console.log(`    Trụ  outer loop closed: ${truClosed}  (${truOuter.length} verts)`);
+
+        const wallMat = new THREE.MeshStandardMaterial({
+            color: 0x888888,
+            side: THREE.DoubleSide,
+            flatShading: true,
+            roughness: 0.85,
+            metalness: 0.0,
+        });
+
+        // ── Outer side-wall ──────────────────────────────────────────────
+        const outerGeom = stitchClosedLoops(vachOuter, truOuter);
+        if (outerGeom) {
+            const outerMesh = new THREE.Mesh(outerGeom, wallMat.clone());
+            outerMesh.name  = `Via_SideWall_${stitchedCount}`;
+            solidGroup.add(outerMesh);
             stitchedCount++;
+        }
+
+        // ── Inner hole side-walls (one per hole loop in Vách) ────────────
+        const vachInner = vachSorted.slice(1);
+        const truInner  = truSorted.slice(1);
+        const truAvgZ   = truOuter.reduce((s, v) => s + v.z, 0) / truOuter.length;
+
+        for (let hi = 0; hi < vachInner.length; hi++) {
+            const vHole = vachInner[hi];
+
+            // Try to match a corresponding inner Trụ loop by XY centroid proximity.
+            let tHole = null;
+            if (truInner.length > 0) {
+                const vc = _loopCenter(vHole);
+                let bestDist = Infinity, bestIdx = 0;
+                truInner.forEach((tl, ti) => {
+                    const d = Math.hypot(vc.x - _loopCenter(tl).x, vc.y - _loopCenter(tl).y);
+                    if (d < bestDist) { bestDist = d; bestIdx = ti; }
+                });
+                tHole = truInner[bestIdx];
+                console.log(`    Hole ${hi}: matched Trụ inner loop (dist=${bestDist.toFixed(1)})`);
+            } else {
+                // Trụ has no hole — project Vách hole loop down to Trụ z-level.
+                tHole = vHole.map(v => new THREE.Vector3(v.x, v.y, truAvgZ));
+                console.log(`    Hole ${hi}: no Trụ inner loop, projecting to z=${truAvgZ.toFixed(1)}`);
+            }
+
+            drawDebugLoop(vHole, 0xff00ff, solidGroup, `Vach_Hole_${hi}`);
+            drawDebugLoop(tHole, 0x00ff88, solidGroup, `Tru_Hole_${hi}`);
+
+            const holeGeom = stitchClosedLoops(vHole, tHole);
+            if (holeGeom) {
+                const holeMesh = new THREE.Mesh(holeGeom, wallMat.clone());
+                holeMesh.name  = `Via_HoleWall_${stitchedCount}`;
+                solidGroup.add(holeMesh);
+                stitchedCount++;
+            }
         }
     }
 
@@ -300,6 +341,12 @@ function longestLoop(loops) {
     return loops.reduce((best, l) => l.length > best.length ? l : best, loops[0]);
 }
 
+function _loopCenter(loop) {
+    let sx = 0, sy = 0;
+    for (const v of loop) { sx += v.x; sy += v.y; }
+    return { x: sx / loop.length, y: sy / loop.length };
+}
+
 function matchByXYCentroid(vachList, truList) {
     const centroid = meshObj => {
         const pos = meshObj.geometry.attributes.position;
@@ -312,10 +359,15 @@ function matchByXYCentroid(vachList, truList) {
     const usedTru = new Set();
 
     for (const vach of vachList) {
-        const vc = centroid(vach);
+        const vc  = centroid(vach);
+        const via = vach.userData.viaName;
+        const blk = vach.userData.blockName;
+
         let bestIdx = -1, bestDist = Infinity;
         truList.forEach((tru, ti) => {
             if (usedTru.has(ti)) return;
+            // Must belong to the same via + block group.
+            if (tru.userData.viaName !== via || tru.userData.blockName !== blk) return;
             const tc = centroid(tru);
             const d  = Math.hypot(vc.x - tc.x, vc.y - tc.y);
             if (d < bestDist) { bestDist = d; bestIdx = ti; }

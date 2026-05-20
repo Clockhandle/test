@@ -77,16 +77,20 @@ struct MeshOut {
     std::vector<std::array<double, 3>> vertices;
     std::vector<std::array<int, 3>>    triangles;
     int    num_contours  = 0;
+    int    num_holes     = 0;
     int    dropped_slope = 0;
+    int    dropped_hole  = 0;
     double slope_used    = 0.0;
 };
 
 static MeshOut mesh_boundary(const Polyline&                     boundary,
                               const std::vector<const Polyline*>& contours,
+                              const std::vector<const Polyline*>& holes,
                               double                              slope_threshold)
 {
     MeshOut out;
     out.num_contours = static_cast<int>(contours.size());
+    out.num_holes    = static_cast<int>(holes.size());
     out.slope_used   = slope_threshold;
     if (boundary.size() < 3) return out;
 
@@ -130,6 +134,21 @@ static MeshOut mesh_boundary(const Polyline&                     boundary,
                 cdt.insert_constraint(cvh[i], cvh[i + 1]);
     }
 
+    // --- hole polygons as constrained closed loops ---
+    // Each hole boundary is inserted as a constraint ring so the CDT respects
+    // the hole edge exactly; triangles inside are removed in the filter below.
+    for (const Polyline* hp : holes) {
+        const Polyline& h = *hp;
+        if (h.size() < 3) continue;
+        std::vector<VH> hvh(h.size());
+        for (std::size_t i = 0; i < h.size(); ++i)
+            hvh[i] = ins(h[i][0], h[i][1], h[i][2]);
+        for (std::size_t i = 0; i < h.size(); ++i) {
+            VH a = hvh[i], b = hvh[(i + 1) % h.size()];
+            if (a != b) cdt.insert_constraint(a, b);
+        }
+    }
+
     // Build vertex-handle → output-index map on demand.
     std::unordered_map<VH, int, VHHash> vidx;
     auto get_idx = [&](VH vh) -> int {
@@ -152,6 +171,13 @@ static MeshOut mesh_boundary(const Polyline&                     boundary,
         double cx = (x0 + x1 + x2) / 3.0;
         double cy = (y0 + y1 + y2) / 3.0;
         if (!point_in_polygon_xy(cx, cy, boundary)) continue;
+
+        // Hole exclusion — drop triangles whose centroid falls inside any hole.
+        bool in_hole = false;
+        for (const Polyline* hp : holes) {
+            if (point_in_polygon_xy(cx, cy, *hp)) { in_hole = true; break; }
+        }
+        if (in_hole) { ++out.dropped_hole; continue; }
 
         // Slope filter — drop spike triangles.
         if (slope_threshold > 0.0) {
@@ -181,14 +207,15 @@ int main()
 
     std::vector<Polyline> contours;
     std::vector<Polyline> boundaries;
+    std::vector<Polyline> holes;
     double slope_threshold = 5.0;
 
     std::string tok;
     while (std::cin >> tok) {
-        if (tok == "POLYLINES" || tok == "BOUNDARIES") {
+        if (tok == "POLYLINES" || tok == "BOUNDARIES" || tok == "HOLES") {
             int n; std::cin >> n;
             (void)n;  // informational only
-        } else if (tok == "POLY" || tok == "BPOLY") {
+        } else if (tok == "POLY" || tok == "BPOLY" || tok == "HOLE") {
             int k; std::cin >> k;
             Polyline poly;
             poly.reserve(static_cast<std::size_t>(std::max(0, k)));
@@ -197,7 +224,8 @@ int main()
                 poly.push_back({ x, y, z });
             }
             if (tok == "POLY")  contours.push_back(std::move(poly));
-            else                boundaries.push_back(std::move(poly));
+            else if (tok == "BPOLY") boundaries.push_back(std::move(poly));
+            else                holes.push_back(std::move(poly));
         } else if (tok == "SLOPE") {
             std::cin >> slope_threshold;
         } else {
@@ -223,27 +251,93 @@ int main()
         return false;
     };
 
-    std::vector<std::vector<const Polyline*>> per_boundary(boundaries.size());
-    int orphans = 0;
-    for (const auto& c : contours) {
+    // Store contour indices per boundary so we can trace bad lines back to the source.
+    std::vector<std::vector<int>> per_boundary_idx(boundaries.size());
+    std::vector<int> orphan_indices;
+    for (int ci = 0; ci < static_cast<int>(contours.size()); ++ci) {
+        const auto& c = contours[ci];
         if (c.empty()) continue;
         int hit = -1;
         for (std::size_t b = 0; b < boundaries.size(); ++b)
             if (contour_probe_inside(c, b)) { hit = static_cast<int>(b); break; }
-        if (hit >= 0) per_boundary[hit].push_back(&c);
-        else ++orphans;
+        if (hit >= 0) per_boundary_idx[hit].push_back(ci);
+        else orphan_indices.push_back(ci);
     }
+    int orphans = static_cast<int>(orphan_indices.size());
     if (orphans > 0)
         std::cerr << "[mesh_gen] " << orphans << " orphan contour(s) dropped.\n";
 
     std::size_t total_verts = 0;
     for (const auto& c : contours)   total_verts += c.size();
     for (const auto& b : boundaries) total_verts += b.size();
+    for (const auto& h : holes)      total_verts += h.size();
 
+    // Assign each hole to the boundary whose polygon contains it.
+    // Uses the same probe-inside logic as contours.
+    std::vector<std::vector<int>> per_boundary_holes(boundaries.size());
+    for (int hi = 0; hi < static_cast<int>(holes.size()); ++hi) {
+        const auto& h = holes[hi];
+        if (h.empty()) continue;
+        int matched = -1;
+        for (std::size_t b = 0; b < boundaries.size(); ++b) {
+            if (contour_probe_inside(h, b)) { matched = static_cast<int>(b); break; }
+        }
+        if (matched >= 0) per_boundary_holes[matched].push_back(hi);
+        else std::cerr << "[mesh_gen] hole " << hi << " did not match any boundary (orphan hole).\n";
+    }
+    std::cerr << "[mesh_gen] " << holes.size() << " hole(s) read, "
+              << boundaries.size() << " boundary(s).\n";
+    for (std::size_t b = 0; b < boundaries.size(); ++b)
+        if (!per_boundary_holes[b].empty())
+            std::cerr << "[mesh_gen]   boundary " << b << " -> "
+                      << per_boundary_holes[b].size() << " hole(s)\n";
+
+    // Build per-mesh pointer lists and run meshing.
     std::vector<MeshOut> meshes;
     meshes.reserve(boundaries.size());
-    for (std::size_t b = 0; b < boundaries.size(); ++b)
-        meshes.push_back(mesh_boundary(boundaries[b], per_boundary[b], slope_threshold));
+    for (std::size_t b = 0; b < boundaries.size(); ++b) {
+        std::vector<const Polyline*> ptrs;
+        ptrs.reserve(per_boundary_idx[b].size());
+        for (int ci : per_boundary_idx[b]) ptrs.push_back(&contours[ci]);
+        std::vector<const Polyline*> hptrs;
+        hptrs.reserve(per_boundary_holes[b].size());
+        for (int hi : per_boundary_holes[b]) hptrs.push_back(&holes[hi]);
+        meshes.push_back(mesh_boundary(boundaries[b], ptrs, hptrs, slope_threshold));
+        std::cerr << "[mesh_gen] boundary " << b << ": "
+                  << ptrs.size() << " contours, "
+                  << hptrs.size() << " holes, "
+                  << "dropped_hole=" << meshes.back().dropped_hole << "\n";
+    }
+
+    // ---- Diagnostic warnings ----
+    // Collect (a) orphan contours and (b) contours whose vertices stray outside
+    // their assigned boundary.  Both cause fins/spikes in the output mesh.
+    struct ContourWarn {
+        int    boundary_idx;   // -1 = orphan
+        int    contour_idx;
+        int    total_verts;
+        int    outside_verts;  // 0 for orphans (all outside by definition)
+        std::array<double, 3> first_vert;
+        std::array<double, 3> last_vert;
+    };
+    std::vector<ContourWarn> warnings;
+
+    for (int ci : orphan_indices) {
+        const auto& c = contours[ci];
+        warnings.push_back({ -1, ci, static_cast<int>(c.size()),
+                             static_cast<int>(c.size()), c.front(), c.back() });
+    }
+    for (std::size_t b = 0; b < boundaries.size(); ++b) {
+        for (int ci : per_boundary_idx[b]) {
+            const auto& c = contours[ci];
+            int outside = 0;
+            for (const auto& v : c)
+                if (!point_in_polygon_xy(v[0], v[1], boundaries[b])) ++outside;
+            if (outside > 0)
+                warnings.push_back({ static_cast<int>(b), ci, static_cast<int>(c.size()),
+                                     outside, c.front(), c.back() });
+        }
+    }
 
     // Emit JSON.
     std::ostringstream out;
@@ -253,15 +347,35 @@ int main()
         << ",\"num_boundaries\":"      << boundaries.size()
         << ",\"num_orphan_contours\":" << orphans
         << ",\"num_input_vertices\":"  << total_verts
-        << ",\"num_meshes\":"          << meshes.size()
-        << ",\"meshes\":[";
+        << ",\"num_meshes\":"           << meshes.size()
+        << ",\"num_warnings\":"         << warnings.size()
+        << ",\"warnings\":["; 
+    for (std::size_t i = 0; i < warnings.size(); ++i) {
+        if (i) out << ",";
+        const auto& w = warnings[i];
+        std::string msg = (w.boundary_idx < 0)
+            ? ("Orphan: not inside any boundary (" + std::to_string(w.total_verts) + " verts)")
+            : ("Leaks outside boundary " + std::to_string(w.boundary_idx) + ": " +
+               std::to_string(w.outside_verts) + "/" + std::to_string(w.total_verts) + " verts outside");
+        out << "{\"boundary_idx\":"  << w.boundary_idx
+            << ",\"contour_idx\":"   << w.contour_idx
+            << ",\"total_verts\":"   << w.total_verts
+            << ",\"outside_verts\":" << w.outside_verts
+            << ",\"first_vertex\":[" << w.first_vert[0] << "," << w.first_vert[1] << "," << w.first_vert[2] << "]"
+            << ",\"last_vertex\":["
+            << w.last_vert[0] << "," << w.last_vert[1] << "," << w.last_vert[2] << "]"
+            << ",\"message\":\"" << msg << "\"}";
+    }
+    out << "],\"meshes\":[";
 
     for (std::size_t i = 0; i < meshes.size(); ++i) {
         if (i) out << ",";
         const auto& m = meshes[i];
         out << "{"
             << "\"num_contours\":"    << m.num_contours
+            << ",\"num_holes\":"      << m.num_holes
             << ",\"dropped_slope\":"  << m.dropped_slope
+            << ",\"dropped_hole\":"   << m.dropped_hole
             << ",\"slope_used\":"     << m.slope_used
             << ",\"num_vertices\":"   << m.vertices.size()
             << ",\"num_triangles\":"  << m.triangles.size()
