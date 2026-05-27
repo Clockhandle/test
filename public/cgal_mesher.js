@@ -49,13 +49,15 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         const blk  = seg.blockName   || '__default__';
         const key  = `${via}||${blk}||${ft}`;
         if (!groups.has(key)) {
-            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [] });
+            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [], breaklines: [], scatter: [] });
         }
         const g = groups.get(key);
         const poly = seg.map(v => [v.x, v.y, v.z]);
-        if (seg.isBoundary)    g.boundaries.push(poly);
-        else if (seg.isHole)   g.holes.push(poly);
-        else                   g.polylines.push(poly);
+        if (seg.isBoundary)       g.boundaries.push(poly);
+        else if (seg.isHole)      g.holes.push(poly);
+        else if (seg.isBreakLine) g.breaklines.push(poly);
+        else if (seg.isBemat)     { for (const v of poly) g.scatter.push(v); }
+        else                      g.polylines.push(poly);
     }
 
     const meshableGroups = [...groups.values()].filter(g => g.boundaries.length > 0);
@@ -72,7 +74,9 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     try {
         results = await Promise.all(meshableGroups.map(async g => {
             const payload = { polylines: g.polylines, boundaries: g.boundaries };
-            if (g.holes.length > 0) payload.holes = g.holes;
+            if (g.holes.length > 0)       payload.holes      = g.holes;
+            if (g.breaklines.length > 0)  payload.breaklines = g.breaklines;
+            if (g.scatter.length > 0)     payload.scatter    = g.scatter;
             if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
             const resp = await fetch('/api/mesh', {
                 method: 'POST',

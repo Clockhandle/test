@@ -40,6 +40,8 @@ export function createMeshHandler(rootDir) {
         const polylines  = body.polylines  || [];
         const boundaries = body.boundaries || [];
         const holes      = body.holes      || [];
+        const breaklines = body.breaklines || [];
+        const scatter    = body.scatter    || [];
         if (!Array.isArray(boundaries) || boundaries.length === 0) {
             res.status(400).json({ ok: false, error: 'Request body must include non-empty "boundaries" array (closed loops).' });
             return;
@@ -50,6 +52,8 @@ export function createMeshHandler(rootDir) {
         lines.push(`POLYLINES ${polylines.length}`);
         lines.push(`BOUNDARIES ${boundaries.length}`);
         lines.push(`HOLES ${holes.length}`);
+        lines.push(`BREAKLINES ${breaklines.length}`);
+        lines.push(`SCATTER ${scatter.length}`);
         let totalVerts = 0;
 
         const writePoly = (token, poly) => {
@@ -81,6 +85,21 @@ export function createMeshHandler(rootDir) {
                 res.status(400).json({ ok: false, error: 'Non-finite vertex in holes.' });
                 return;
             }
+        }
+        for (const poly of breaklines) {
+            if (!writePoly('BRLINE', poly)) {
+                res.status(400).json({ ok: false, error: 'Non-finite vertex in breaklines.' });
+                return;
+            }
+        }
+        for (const pt of scatter) {
+            const x = Number(pt[0]), y = Number(pt[1]), z = Number(pt[2] ?? 0);
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                res.status(400).json({ ok: false, error: 'Non-finite vertex in scatter.' });
+                return;
+            }
+            lines.push(`PT ${x} ${y} ${z}`);
+            ++totalVerts;
         }
         if (typeof body.slope === 'number' && body.slope >= 0) {
             lines.push(`SLOPE ${body.slope}`);

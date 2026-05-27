@@ -18,6 +18,11 @@
 //   POLY  <K>         open contour: K vertices follow as "x y z"
 //   BPOLY <K>         closed boundary loop: K vertices (no repeated first)
 //   SLOPE <v>         max (delta_z / XY_edge) kept (default 5.0; <=0 = no filter)
+//   BREAKLINES <B>    number of BRLINE blocks
+//   SCATTER <S>       number of PT tokens
+//   BRLINE <K>        breakline polyline: K vertices as "x y z" (interior constraint;
+//                     triangles adjacent to this edge are exempt from slope filter)
+//   PT <x> <y> <z>    scatter free vertex (no constraint edges; improves surface detail)
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
@@ -32,6 +37,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // ---- CGAL type stack ----
@@ -83,10 +89,12 @@ struct MeshOut {
     double slope_used    = 0.0;
 };
 
-static MeshOut mesh_boundary(const Polyline&                     boundary,
-                              const std::vector<const Polyline*>& contours,
-                              const std::vector<const Polyline*>& holes,
-                              double                              slope_threshold)
+static MeshOut mesh_boundary(const Polyline&                          boundary,
+                              const std::vector<const Polyline*>&      contours,
+                              const std::vector<const Polyline*>&      holes,
+                              const std::vector<const Polyline*>&      breaklines,
+                              const std::vector<std::array<double,3>>& scatter,
+                              double                                   slope_threshold)
 {
     MeshOut out;
     out.num_contours = static_cast<int>(contours.size());
@@ -149,7 +157,38 @@ static MeshOut mesh_boundary(const Polyline&                     boundary,
         }
     }
 
-    // Build vertex-handle → output-index map on demand.
+    // --- breakline polylines (interior constraints, slope-filter exempt) ---
+    using VHPair = std::pair<VH, VH>;
+    auto make_vhpair = [](VH a, VH b) -> VHPair {
+        return (a < b) ? VHPair{a, b} : VHPair{b, a};
+    };
+    struct VHPairHash {
+        std::size_t operator()(const VHPair& p) const noexcept {
+            std::size_t h1 = std::hash<const void*>()(static_cast<const void*>(&*p.first));
+            std::size_t h2 = std::hash<const void*>()(static_cast<const void*>(&*p.second));
+            return h1 ^ (h2 * 2654435761u);
+        }
+    };
+    std::unordered_set<VHPair, VHPairHash> breakline_edges;
+    for (const Polyline* bp : breaklines) {
+        const Polyline& bl = *bp;
+        if (bl.size() < 2) continue;
+        std::vector<VH> bvh(bl.size());
+        for (std::size_t i = 0; i < bl.size(); ++i)
+            bvh[i] = ins(bl[i][0], bl[i][1], bl[i][2]);
+        for (std::size_t i = 0; i + 1 < bl.size(); ++i) {
+            if (bvh[i] != bvh[i + 1]) {
+                cdt.insert_constraint(bvh[i], bvh[i + 1]);
+                breakline_edges.insert(make_vhpair(bvh[i], bvh[i + 1]));
+            }
+        }
+    }
+
+    // --- scatter free vertices (no constraint edges) ---
+    for (const auto& pt : scatter)
+        ins(pt[0], pt[1], pt[2]);
+
+    // Build vertex-handle -> output-index map on demand.
     std::unordered_map<VH, int, VHHash> vidx;
     auto get_idx = [&](VH vh) -> int {
         auto it = vidx.find(vh);
@@ -179,18 +218,24 @@ static MeshOut mesh_boundary(const Polyline&                     boundary,
         }
         if (in_hole) { ++out.dropped_hole; continue; }
 
-        // Slope filter — drop spike triangles.
+        // Slope filter — drop spike triangles (breakline-adjacent triangles exempt).
         if (slope_threshold > 0.0) {
-            double z0 = v0->info(), z1 = v1->info(), z2 = v2->info();
-            double zmin = std::min({ z0, z1, z2 });
-            double zmax = std::max({ z0, z1, z2 });
-            double e01  = std::sqrt((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0));
-            double e12  = std::sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
-            double e20  = std::sqrt((x0-x2)*(x0-x2) + (y0-y2)*(y0-y2));
-            double longest = std::max({ e01, e12, e20 });
-            if (longest > 0.0 && (zmax - zmin) / longest > slope_threshold) {
-                ++out.dropped_slope;
-                continue;
+            bool exempt = !breakline_edges.empty() &&
+                          (breakline_edges.count(make_vhpair(v0, v1)) ||
+                           breakline_edges.count(make_vhpair(v1, v2)) ||
+                           breakline_edges.count(make_vhpair(v2, v0)));
+            if (!exempt) {
+                double z0 = v0->info(), z1 = v1->info(), z2 = v2->info();
+                double zmin = std::min({ z0, z1, z2 });
+                double zmax = std::max({ z0, z1, z2 });
+                double e01  = std::sqrt((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0));
+                double e12  = std::sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+                double e20  = std::sqrt((x0-x2)*(x0-x2) + (y0-y2)*(y0-y2));
+                double longest = std::max({ e01, e12, e20 });
+                if (longest > 0.0 && (zmax - zmin) / longest > slope_threshold) {
+                    ++out.dropped_slope;
+                    continue;
+                }
             }
         }
 
@@ -205,9 +250,11 @@ int main()
 {
     std::ios::sync_with_stdio(false);
 
-    std::vector<Polyline> contours;
-    std::vector<Polyline> boundaries;
-    std::vector<Polyline> holes;
+    std::vector<Polyline>               contours;
+    std::vector<Polyline>               boundaries;
+    std::vector<Polyline>               holes;
+    std::vector<Polyline>               breaklines;
+    std::vector<std::array<double, 3>>  scatter;
     double slope_threshold = 5.0;
 
     std::string tok;
@@ -228,6 +275,21 @@ int main()
             else                holes.push_back(std::move(poly));
         } else if (tok == "SLOPE") {
             std::cin >> slope_threshold;
+        } else if (tok == "BREAKLINES" || tok == "SCATTER") {
+            int n; std::cin >> n;
+            (void)n;
+        } else if (tok == "BRLINE") {
+            int k; std::cin >> k;
+            Polyline poly;
+            poly.reserve(static_cast<std::size_t>(std::max(0, k)));
+            for (int i = 0; i < k; ++i) {
+                double x, y, z; std::cin >> x >> y >> z;
+                poly.push_back({ x, y, z });
+            }
+            breaklines.push_back(std::move(poly));
+        } else if (tok == "PT") {
+            double x, y, z; std::cin >> x >> y >> z;
+            scatter.push_back({ x, y, z });
         } else {
             std::cerr << "[mesh_gen] Unknown token: '" << tok << "'\n";
             return 2;
@@ -268,9 +330,11 @@ int main()
         std::cerr << "[mesh_gen] " << orphans << " orphan contour(s) dropped.\n";
 
     std::size_t total_verts = 0;
-    for (const auto& c : contours)   total_verts += c.size();
-    for (const auto& b : boundaries) total_verts += b.size();
-    for (const auto& h : holes)      total_verts += h.size();
+    for (const auto& c : contours)    total_verts += c.size();
+    for (const auto& b : boundaries)  total_verts += b.size();
+    for (const auto& h : holes)       total_verts += h.size();
+    for (const auto& bl : breaklines) total_verts += bl.size();
+    total_verts += scatter.size();
 
     // Assign each hole to the boundary whose polygon contains it.
     // Uses the same probe-inside logic as contours.
@@ -292,6 +356,28 @@ int main()
             std::cerr << "[mesh_gen]   boundary " << b << " -> "
                       << per_boundary_holes[b].size() << " hole(s)\n";
 
+    // Assign each breakline to the boundary whose polygon contains it.
+    std::vector<std::vector<int>> per_boundary_bl(boundaries.size());
+    for (int bli = 0; bli < static_cast<int>(breaklines.size()); ++bli) {
+        const auto& bl = breaklines[bli];
+        if (bl.empty()) continue;
+        int hit = -1;
+        for (std::size_t b = 0; b < boundaries.size(); ++b)
+            if (contour_probe_inside(bl, b)) { hit = static_cast<int>(b); break; }
+        if (hit >= 0) per_boundary_bl[hit].push_back(bli);
+        else std::cerr << "[mesh_gen] breakline " << bli << " did not match any boundary (orphan).\n";
+    }
+
+    // Assign each scatter point to the boundary whose polygon contains it.
+    std::vector<std::vector<int>> per_boundary_sc(boundaries.size());
+    for (int sci = 0; sci < static_cast<int>(scatter.size()); ++sci) {
+        const auto& pt = scatter[sci];
+        int hit = -1;
+        for (std::size_t b = 0; b < boundaries.size(); ++b)
+            if (point_in_polygon_xy(pt[0], pt[1], boundaries[b])) { hit = static_cast<int>(b); break; }
+        if (hit >= 0) per_boundary_sc[hit].push_back(sci);
+    }
+
     // Build per-mesh pointer lists and run meshing.
     std::vector<MeshOut> meshes;
     meshes.reserve(boundaries.size());
@@ -302,10 +388,18 @@ int main()
         std::vector<const Polyline*> hptrs;
         hptrs.reserve(per_boundary_holes[b].size());
         for (int hi : per_boundary_holes[b]) hptrs.push_back(&holes[hi]);
-        meshes.push_back(mesh_boundary(boundaries[b], ptrs, hptrs, slope_threshold));
+        std::vector<const Polyline*> blptrs;
+        blptrs.reserve(per_boundary_bl[b].size());
+        for (int bli : per_boundary_bl[b]) blptrs.push_back(&breaklines[bli]);
+        std::vector<std::array<double, 3>> scpts;
+        scpts.reserve(per_boundary_sc[b].size());
+        for (int sci : per_boundary_sc[b]) scpts.push_back(scatter[sci]);
+        meshes.push_back(mesh_boundary(boundaries[b], ptrs, hptrs, blptrs, scpts, slope_threshold));
         std::cerr << "[mesh_gen] boundary " << b << ": "
                   << ptrs.size() << " contours, "
                   << hptrs.size() << " holes, "
+                  << blptrs.size() << " breaklines, "
+                  << scpts.size() << " scatter pts, "
                   << "dropped_hole=" << meshes.back().dropped_hole << "\n";
     }
 

@@ -26,7 +26,8 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === 'Polyline3d' || 
                            meshItem.Type === '3D Polyline' || 
                            meshItem.Type === 'Boundary';
-        const isHole = meshItem.IsHole === true;
+        const isHole      = meshItem.IsHole      === true;
+        const isBreakLine = meshItem.IsBreakLine === true;
         const blockName = meshItem.BlockName || null;
         const viaName   = meshItem.ViaName   || null;
 
@@ -35,7 +36,9 @@ export async function setupFileInput(onDataLoaded) {
             .replace(/[\u0300-\u036f]/g, '').toLowerCase();
         const featureType = rawType.includes('vach') ? 'vach'
                           : rawType.includes('tru')  ? 'tru'
+                          : (rawType.includes('be mat') || rawType.includes('bemat')) ? 'bemat'
                           : null;
+        const isBemat = featureType === 'bemat';
 
         meshItem.FlattenedVertices.forEach(vertex => {
           const x = vertex[0];
@@ -52,12 +55,14 @@ export async function setupFileInput(onDataLoaded) {
           
           // If the Z value changes, start a new line segment
           // (holes and boundaries are 3D closed loops — never split them)
-          if (!isBoundary && !isHole && currentZ !== null && currentZ !== z) {
+          if (!isBoundary && !isHole && !isBreakLine && !isBemat && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
-              currentSegment.isBoundary = false;
+              currentSegment.isBoundary  = false;
+              currentSegment.isBreakLine = isBreakLine;
+              currentSegment.isBemat     = isBemat;
               currentSegment.featureType = featureType;
-              currentSegment.blockName = blockName;
-              currentSegment.viaName   = viaName;
+              currentSegment.blockName   = blockName;
+              currentSegment.viaName     = viaName;
               lineSegments.push(currentSegment);
             }
             currentSegment = [];
@@ -68,11 +73,13 @@ export async function setupFileInput(onDataLoaded) {
         });
         
         if (currentSegment.length > 0) {
-          currentSegment.isBoundary = isBoundary;
-          currentSegment.isHole = isHole;
+          currentSegment.isBoundary  = isBoundary;
+          currentSegment.isHole      = isHole;
+          currentSegment.isBreakLine = isBreakLine;
+          currentSegment.isBemat     = isBemat;
           currentSegment.featureType = featureType;
-          currentSegment.blockName = blockName;
-          currentSegment.viaName   = viaName;
+          currentSegment.blockName   = blockName;
+          currentSegment.viaName     = viaName;
           lineSegments.push(currentSegment);
         }
       });
