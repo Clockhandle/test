@@ -5,19 +5,75 @@
 import * as THREE from 'three';
 
 let cgalGroup = null;
-let pendingWarnings = [];  // accumulated across all feature groups from last mesh run
+let pendingWarnings        = [];  // bad contour lines from last mesh run
+let pendingZOutliers       = [];  // Z-spike segments detected at data-load time
+let pendingScatterSuspects = [];  // elevation points whose Z is outside the contour Z range
+let pendingScatterTooSteep = [];  // elevation points that would cause slope-filter holes near a breakline
 
 function setupIssueExport() {
     const btn = document.getElementById('export-issues-btn');
     if (!btn || btn._wired) return;
     btn._wired = true;
     btn.addEventListener('click', () => {
-        if (pendingWarnings.length === 0) return;
-        const lines = ['Bad contour lines detected by CGAL mesh — fix these in CAD:\n'];
-        pendingWarnings.forEach(({ viaName, featureType, blockName, w }) => {
-            const type = w.boundary_idx === -1 ? 'ORPHAN' : `LEAKS (${w.outside_verts}/${w.total_verts} verts outside boundary)`;
-            lines.push(`${type}: line with z = ${w.first_vertex[2].toFixed(3)}  [via: ${viaName ?? '?'}, block: ${blockName ?? '?'}, type: ${featureType ?? 'unknown'}]`);
-        });
+        if (pendingWarnings.length === 0 && pendingZOutliers.length === 0 && pendingScatterSuspects.length === 0) return;
+        const lines = [];
+        if (pendingZOutliers.length > 0) {
+            lines.push('=== Z-OUTLIER VERTICES (unset Z / Z=0 — fix in CAD source) ===\n');
+            pendingZOutliers.forEach(({ viaName, blockName, featureType, handle, layer, segZ, outliers }) => {
+                const meta  = [
+                    handle      ? `Handle: ${handle}` : null,
+                    layer       ? `Layer: ${layer}`   : null,
+                    viaName     ? `via: ${viaName}`   : null,
+                    blockName   ? `block: ${blockName}` : null,
+                    featureType ? `type: ${featureType}` : null,
+                ].filter(Boolean).join('  |  ');
+                const allBad = outliers.every(v => v[2] === segZ);
+                if (allBad && segZ === 0) {
+                    const xy = `x=${outliers[0][0].toFixed(3)}, y=${outliers[0][1].toFixed(3)}`;
+                    lines.push(`ENTITY_AT_Z0: entire polyline at Z=0  first_vertex=(${xy})  |  ${meta}`);
+                } else {
+                    const badZ = outliers.map(v => v[2].toFixed(3)).join(', ');
+                    const xy   = `x=${outliers[0][0].toFixed(3)}, y=${outliers[0][1].toFixed(3)}`;
+                    lines.push(`SPIKE: seg_z=${segZ?.toFixed(3) ?? '?'}  bad_z=[${badZ}]  at=(${xy})  |  ${meta}`);
+                }
+            });
+            lines.push('');
+        }
+        if (pendingScatterTooSteep.length > 0) {
+            lines.push('=== SCATTER POINTS TOO STEEP vs BREAKLINE (likely causing slope holes — use Mesh Strict to remove) ===\n');
+            pendingScatterTooSteep.forEach(({ x, y, z, bx, by, bz, slope, slopeThreshold, handle, layer, viaName, blockName, featureType }) => {
+                const meta = [
+                    handle      ? `Handle: ${handle}`    : null,
+                    layer       ? `Layer: ${layer}`      : null,
+                    viaName     ? `via: ${viaName}`      : null,
+                    blockName   ? `block: ${blockName}`  : null,
+                    featureType ? `type: ${featureType}` : null,
+                ].filter(Boolean).join('  |  ');
+                lines.push(`SCATTER_TOO_STEEP: z=${z.toFixed(3)}  slope_to_nearest_breakline=${slope.toFixed(2)} (threshold=${slopeThreshold})  at=(x=${x.toFixed(3)}, y=${y.toFixed(3)})  nearest_breakline=(x=${bx.toFixed(3)}, y=${by.toFixed(3)}, z=${bz.toFixed(3)})  |  ${meta}`);
+            });
+            lines.push('');
+        }
+        if (pendingScatterSuspects.length > 0) {
+            lines.push('=== SCATTER POINT Z SUSPECTS (Bề mặt elevation points outside contour Z range — may cause slope holes) ===\n');
+            pendingScatterSuspects.forEach(({ x, y, z, median, zLow, zHigh, deviation, handle, layer, viaName, blockName, featureType }) => {
+                const meta = [
+                    handle      ? `Handle: ${handle}`    : null,
+                    layer       ? `Layer: ${layer}`      : null,
+                    viaName     ? `via: ${viaName}`      : null,
+                    blockName   ? `block: ${blockName}`  : null,
+                    featureType ? `type: ${featureType}` : null,
+                ].filter(Boolean).join('  |  ');
+                lines.push(`SCATTER_SUSPECT: z=${z.toFixed(3)}  dev=${deviation.toFixed(3)}m_outside_fence  (median=${median.toFixed(3)}, valid=[${zLow.toFixed(3)}, ${zHigh.toFixed(3)}])  at=(x=${x.toFixed(3)}, y=${y.toFixed(3)})  |  ${meta}`);
+            });
+            lines.push('');
+        }
+        if (pendingWarnings.length > 0) {
+            lines.push('=== BAD CONTOUR LINES (orphan / leaking outside boundary) ===\n');
+            pendingWarnings.forEach(({ viaName, featureType, blockName, w }) => {
+                const type = w.boundary_idx === -1 ? 'ORPHAN' : `LEAKS (${w.outside_verts}/${w.total_verts} verts outside boundary)`;
+                lines.push(`${type}: line with z = ${w.first_vertex[2].toFixed(3)}  [via: ${viaName ?? '?'}, block: ${blockName ?? '?'}, type: ${featureType ?? 'unknown'}]`);
+            });
+        }
         const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
@@ -28,7 +84,33 @@ function setupIssueExport() {
 }
 
 /**
- * @param {Array<Array<THREE.Vector3>>} rawDataSegments
+ * Call this immediately after data is loaded (before meshing) so the
+ * Export Issues button appears as soon as the JSON is uploaded.
+ */
+export function checkZOutliers(segments) {
+    pendingZOutliers = [];
+    for (const seg of segments) {
+        if (seg.zOutliers && seg.zOutliers.length > 0) {
+            pendingZOutliers.push({
+                viaName:     seg.viaName     ?? null,
+                blockName:   seg.blockName   ?? null,
+                featureType: seg.featureType ?? null,
+                handle:      seg.handle      ?? null,
+                layer:       seg.layer       ?? null,
+                segZ:        seg[0]?.z       ?? null,
+                outliers:    seg.zOutliers,
+            });
+        }
+    }
+    if (pendingZOutliers.length > 0)
+        console.warn(`[Z-outlier] ${pendingZOutliers.length} segment(s) with anomalous Z vertices. Click "Export Issues" to get the list.`);
+    setupIssueExport();
+    const issueBtn = document.getElementById('export-issues-btn');
+    if (issueBtn) issueBtn.style.display = pendingZOutliers.length > 0 ? '' : 'none';
+    return pendingZOutliers.length;
+}
+
+/**
  * @param {THREE.Group} meshGroup
  * @param {Object} [opts]
  * @param {number} [opts.slope]  Max (delta_z / XY_edge) kept. Default 5.0; 0 = no filter.
@@ -49,15 +131,23 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         const blk  = seg.blockName   || '__default__';
         const key  = `${via}||${blk}||${ft}`;
         if (!groups.has(key)) {
-            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [], breaklines: [], scatter: [] });
+            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [], breaklines: [], scatter: [], scatterMeta: [] });
         }
         const g = groups.get(key);
         const poly = seg.map(v => [v.x, v.y, v.z]);
         if (seg.isBoundary)       g.boundaries.push(poly);
         else if (seg.isHole)      g.holes.push(poly);
         else if (seg.isBreakLine) g.breaklines.push(poly);
-        else if (seg.isBemat)     { for (const v of poly) g.scatter.push(v); }
-        else                      g.polylines.push(poly);
+        else if (seg.isBemat) {
+            if (poly.length === 1) {
+                // True single-point elevation measurement → scatter (free vertex, no constraints).
+                g.scatter.push(poly[0]);
+                g.scatterMeta.push({ handle: seg.handle ?? null, layer: seg.layer ?? null, viaName: seg.viaName ?? null, blockName: seg.blockName ?? null, featureType: seg.featureType ?? null });
+            } else {
+                // Multi-vertex Bề mặt polyline → treat as a contour line with edge constraints.
+                g.polylines.push(poly);
+            }
+        } else                    g.polylines.push(poly);
     }
 
     const meshableGroups = [...groups.values()].filter(g => g.boundaries.length > 0);
@@ -67,7 +157,100 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     }
 
     setupIssueExport();
-    pendingWarnings = [];
+    pendingWarnings        = [];
+    pendingZOutliers       = [];
+    pendingScatterSuspects = [];
+    pendingScatterTooSteep = [];
+
+    const slopeThreshold = (typeof opts.slope === 'number' && opts.slope >= 0) ? opts.slope : 100.0;
+
+    // Scatter-vs-breakline steep check:
+    // A scatter point whose Z-rise relative to its nearest breakline vertex exceeds
+    // the slope threshold will inevitably create slope-rejected triangles → holes.
+    // Flag those points; in strict mode, remove them from the payload entirely.
+    for (const g of meshableGroups) {
+        if (g.scatter.length === 0 || g.breaklines.length === 0) continue;
+        // Flatten all breakline vertices for this group.
+        const blVerts = [];
+        for (const bl of g.breaklines) for (const v of bl) blVerts.push(v);
+        if (blVerts.length === 0) continue;
+        for (let i = 0; i < g.scatter.length; i++) {
+            const [sx, sy, sz] = g.scatter[i];
+            // Find nearest breakline vertex by XY distance.
+            let bestD2 = Infinity, bestV = null;
+            for (const v of blVerts) {
+                const dx = v[0] - sx, dy = v[1] - sy;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < bestD2) { bestD2 = d2; bestV = v; }
+            }
+            if (!bestV || bestD2 === 0) continue;
+            const dXY   = Math.sqrt(bestD2);
+            const slope = Math.abs(sz - bestV[2]) / dXY;
+            if (slope > slopeThreshold) {
+                const m = g.scatterMeta[i] ?? {};
+                g.scatterMeta[i] = { ...m, tooSteep: true };
+                pendingScatterTooSteep.push({
+                    x: sx, y: sy, z: sz,
+                    bx: bestV[0], by: bestV[1], bz: bestV[2],
+                    slope, slopeThreshold,
+                    handle: m.handle ?? null, layer: m.layer ?? null,
+                    viaName: m.viaName ?? null, blockName: m.blockName ?? null, featureType: m.featureType ?? null,
+                });
+            }
+        }
+    }
+    if (pendingScatterTooSteep.length > 0)
+        console.warn(`[scatter] ${pendingScatterTooSteep.length} elevation point(s) too steep vs nearest breakline — likely causing holes. Click "Export Issues" to see handles.${opts.strict ? ' (strict mode: removed from payload)' : ' Run "Mesh Strict" to remove them.'}`);
+
+    // the 3×IQR fence of the contour Z values in the same group.  Those points
+    // create triangles that exceed the slope threshold → visible holes.
+    for (const g of meshableGroups) {
+        if (g.scatter.length === 0) continue;
+        const contourZs = [];
+        for (const poly of g.polylines) for (const v of poly) contourZs.push(v[2]);
+        if (contourZs.length < 4) continue;
+        contourZs.sort((a, b) => a - b);
+        const _q1  = contourZs[Math.floor(contourZs.length * 0.25)];
+        const _q3  = contourZs[Math.floor(contourZs.length * 0.75)];
+        const _iqr = _q3 - _q1;
+        const zLow  = _q1 - 3 * _iqr;
+        const zHigh = _q3 + 3 * _iqr;
+        const median = contourZs[Math.floor(contourZs.length * 0.5)];
+        for (let i = 0; i < g.scatter.length; i++) {
+            const [sx, sy, sz] = g.scatter[i];
+            const outsideLow  = sz < zLow;
+            const outsideHigh = sz > zHigh;
+            // Only flag if the deviation is more than 5 units beyond the fence
+            // to avoid false positives on points that merely graze the boundary.
+            const minAbsDev = 5.0;
+            const deviation = outsideLow ? (zLow - sz) : outsideHigh ? (sz - zHigh) : 0;
+            if ((outsideLow || outsideHigh) && deviation >= minAbsDev) {
+                const m = g.scatterMeta[i] ?? {};
+                pendingScatterSuspects.push({ x: sx, y: sy, z: sz, median, zLow, zHigh, deviation,
+                    handle: m.handle ?? null, layer: m.layer ?? null,
+                    viaName: m.viaName ?? null, blockName: m.blockName ?? null, featureType: m.featureType ?? null });
+            }
+        }
+    }
+    if (pendingScatterSuspects.length > 0)
+        console.warn(`[scatter] ${pendingScatterSuspects.length} elevation point(s) with Z outside contour range — likely causing slope holes. Click "Export Issues".`);
+
+    // Collect Z-outlier segments flagged during data load.
+    for (const seg of rawDataSegments) {
+        if (seg.zOutliers && seg.zOutliers.length > 0) {
+            pendingZOutliers.push({
+                viaName:     seg.viaName     ?? null,
+                blockName:   seg.blockName   ?? null,
+                featureType: seg.featureType ?? null,
+                handle:      seg.handle      ?? null,
+                layer:       seg.layer       ?? null,
+                segZ:        seg[0]?.z       ?? null,
+                outliers:    seg.zOutliers,
+            });
+        }
+    }
+    if (pendingZOutliers.length > 0)
+        console.warn(`[Z-outlier] ${pendingZOutliers.length} segment(s) with anomalous Z vertices (vertical spikes). Click "Export Issues" to get the list.`);
 
     const t0 = performance.now();
     let results;
@@ -76,7 +259,11 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
             const payload = { polylines: g.polylines, boundaries: g.boundaries };
             if (g.holes.length > 0)       payload.holes      = g.holes;
             if (g.breaklines.length > 0)  payload.breaklines = g.breaklines;
-            if (g.scatter.length > 0)     payload.scatter    = g.scatter;
+            // In strict mode, drop scatter points flagged as too steep vs a breakline.
+            const filteredScatter = opts.strict
+                ? g.scatter.filter((_, i) => !g.scatterMeta[i]?.tooSteep)
+                : g.scatter;
+            if (filteredScatter.length > 0) payload.scatter = filteredScatter;
             if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
             const resp = await fetch('/api/mesh', {
                 method: 'POST',
@@ -120,7 +307,7 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     });
     console.log(`[CGAL-CDT] total roundtrip ${Math.round(dt)} ms`);
     const issueBtn = document.getElementById('export-issues-btn');
-    if (issueBtn) issueBtn.style.display = pendingWarnings.length > 0 ? '' : 'none';
+    if (issueBtn) issueBtn.style.display = (pendingWarnings.length > 0 || pendingZOutliers.length > 0 || pendingScatterSuspects.length > 0 || pendingScatterTooSteep.length > 0) ? '' : 'none';
 
     renderMeshes(results, meshGroup);
 

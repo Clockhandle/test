@@ -6,7 +6,7 @@ import { setupAxisHelper, renderAxisHelper } from './axis_helper.js';
 import { setupBoundaryDrawer, getDrawnPoints, clearBoundaries } from './boundary_drawer.js';
 import { setupCameraMovement, updateCameraMovement } from './camera_movement.js';
 import { setupMesher } from './mesh_generator.js';
-import { buildCgalMesh } from './cgal_mesher.js';
+import { buildCgalMesh, checkZOutliers } from './cgal_mesher.js';
 import { buildViaSolid, computeViaSolidVolumes } from './via_solid.js';
 import { setupTypeToggles } from './type_toggles.js';
 
@@ -66,6 +66,16 @@ function initThreeJS() {
       const slopeInput = document.getElementById('cgal-slope');
       const slopeVal = slopeInput && slopeInput.value !== '' ? Number(slopeInput.value) : null;
       const opts = {};
+      if (Number.isFinite(slopeVal) && slopeVal >= 0) opts.slope = slopeVal;
+      buildCgalMesh(rawDataSegments, meshGroup, opts);
+    });
+  }
+  const cgalStrictBtn = document.getElementById('cgal-mesh-strict-btn');
+  if (cgalStrictBtn) {
+    cgalStrictBtn.addEventListener('click', () => {
+      const slopeInput = document.getElementById('cgal-slope');
+      const slopeVal = slopeInput && slopeInput.value !== '' ? Number(slopeInput.value) : null;
+      const opts = { strict: true };
       if (Number.isFinite(slopeVal) && slopeVal >= 0) opts.slope = slopeVal;
       buildCgalMesh(rawDataSegments, meshGroup, opts);
     });
@@ -144,6 +154,9 @@ function handleNewPoints(arrayOfLineSegments) {
   // Store globally so the Fast Stitch / CGAL buttons can access the data
   rawDataSegments.length = 0;
   rawDataSegments.push(...arrayOfLineSegments);
+
+  // Show the Export Issues button immediately if Z-spike vertices were detected.
+  checkZOutliers(rawDataSegments);
 
   // Clear out ANY old lines/points inside the group
   meshGroup.clear();
