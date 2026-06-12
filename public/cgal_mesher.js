@@ -45,10 +45,79 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         } else                    g.polylines.push(poly);
     }
 
+    // For groups with no boundary, synthesise a convex hull boundary from all
+    // their XY vertices, padded slightly outward, so the C++ mesher can still run.
+    for (const g of groups.values()) {
+        if (g.boundaries.length > 0) continue;
+        // Collect all XY points + Z for this group.
+        const pts = [];
+        let minZ = Infinity, maxZ = -Infinity;
+        const addPt = (x, y, z) => {
+            pts.push([x, y, z]);
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+        };
+        for (const poly of g.polylines)  for (const v of poly) addPt(v[0], v[1], v[2]);
+        for (const bl  of g.breaklines)  for (const v of bl)   addPt(v[0], v[1], v[2]);
+        for (const pt  of g.scatter)                           addPt(pt[0], pt[1], pt[2]);
+        if (pts.length < 3) continue; // not enough points — skip
+
+        // --- 2-D convex hull (gift-wrapping / Jarvis march) ---
+        // Returns indices into pts[] in counter-clockwise order.
+        const cross2 = (o, a, b) => (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]);
+        // Start from leftmost point.
+        let start = 0;
+        for (let i = 1; i < pts.length; i++)
+            if (pts[i][0] < pts[start][0] || (pts[i][0] === pts[start][0] && pts[i][1] < pts[start][1]))
+                start = i;
+        const hull = [];
+        let cur = start;
+        do {
+            hull.push(cur);
+            let next = (cur + 1) % pts.length;
+            for (let i = 0; i < pts.length; i++) {
+                const c = cross2(pts[cur], pts[next], pts[i]);
+                if (c < 0 || (c === 0 &&
+                    (pts[i][0]-pts[cur][0])**2 + (pts[i][1]-pts[cur][1])**2 >
+                    (pts[next][0]-pts[cur][0])**2 + (pts[next][1]-pts[cur][1])**2))
+                    next = i;
+            }
+            cur = next;
+        } while (cur !== start && hull.length <= pts.length);
+
+        if (hull.length < 3) continue;
+
+        // Pad each hull vertex outward from the centroid.
+        const cx = hull.reduce((s, i) => s + pts[i][0], 0) / hull.length;
+        const cy = hull.reduce((s, i) => s + pts[i][1], 0) / hull.length;
+        // Compute a sensible pad: 1% of bounding-box diagonal, minimum 5 m.
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const i of hull) {
+            if (pts[i][0] < minX) minX = pts[i][0]; if (pts[i][0] > maxX) maxX = pts[i][0];
+            if (pts[i][1] < minY) minY = pts[i][1]; if (pts[i][1] > maxY) maxY = pts[i][1];
+        }
+        const diag = Math.sqrt((maxX-minX)**2 + (maxY-minY)**2);
+        const pad  = Math.max(diag * 0.01, 5);
+        // Use the highest Z from breaklines as the hull boundary Z so the outer
+        // skirt slopes down naturally from the highest surveyed edge.
+        // Fall back to overall maxZ if no breaklines exist in this group.
+        let hullZ = -Infinity;
+        for (const bl of g.breaklines) for (const v of bl) if (v[2] > hullZ) hullZ = v[2];
+        if (hullZ === -Infinity) hullZ = maxZ;
+
+        const boundary = hull.map(i => {
+            const dx = pts[i][0] - cx, dy = pts[i][1] - cy;
+            const len = Math.sqrt(dx*dx + dy*dy) || 1;
+            return [pts[i][0] + dx/len*pad, pts[i][1] + dy/len*pad, hullZ];
+        });
+        g.boundaries.push(boundary);
+        console.log(`[CGAL] No boundary for "${g.viaName}/${g.blockName}/${g.featureType}" — convex hull auto-boundary (${hull.length} pts, pad=${pad.toFixed(1)}m)`);
+    }
+
     const meshableGroups = [...groups.values()]
         .filter(g => g.boundaries.length > 0);
     if (meshableGroups.length === 0) {
-        alert('No IsBoundary loops found in the data. Boundary lines are required — mesh generation is confined to the inside of each boundary.');
+        alert('No meshable data found — no polylines, breaklines, or scatter points in any group.');
         return;
     }
 

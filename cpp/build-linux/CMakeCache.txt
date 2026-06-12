@@ -14,8 +14,30 @@
 # EXTERNAL cache entries
 ########################
 
-//The directory containing a CMake configuration file for CGAL.
-CGAL_DIR:PATH=CGAL_DIR-NOTFOUND
+//Activate the debug messages of the script FindBoost
+Boost_DEBUG:BOOL=OFF
+
+//The directory containing a CMake configuration file for Boost.
+Boost_DIR:PATH=Boost_DIR-NOTFOUND
+
+//Link with static Boost libraries
+CGAL_Boost_USE_STATIC_LIBS:BOOL=OFF
+
+//Display memory and real time usage at end of CTest test outputs
+CGAL_CTEST_DISPLAY_MEM_AND_TIME:BOOL=OFF
+
+//Activate the CGAL developers mode. See https://github.com/CGAL/cgal/wiki/CGAL_DEV_MODE
+CGAL_DEV_MODE:BOOL=OFF
+
+//No help, variable specified on the command line.
+CGAL_DIR:UNINITIALIZED=/usr/lib/x86_64-linux-gnu/cmake/CGAL
+
+//Build the testing tree.
+CGAL_ENABLE_TESTING:BOOL=OFF
+
+//If set, the ctest command will not skip the tests of the draw
+// functions.
+CGAL_TEST_DRAW_FUNCTIONS:BOOL=OFF
 
 //Path to a program.
 CMAKE_ADDR2LINE:FILEPATH=/usr/bin/addr2line
@@ -198,6 +220,21 @@ CMAKE_TAPI:FILEPATH=CMAKE_TAPI-NOTFOUND
 // Studio IDE projects all commands are done without /nologo.
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
+//The directory containing the GMP header files
+GMP_INCLUDE_DIR:PATH=GMP_INCLUDE_DIR-NOTFOUND
+
+//Path to the Debug GMP library
+GMP_LIBRARY_DEBUG:FILEPATH=GMP_LIBRARY_DEBUG-NOTFOUND
+
+//Path to the Release GMP library
+GMP_LIBRARY_RELEASE:FILEPATH=GMP_LIBRARY_RELEASE-NOTFOUND
+
+//The directory containing the MPFR header files
+MPFR_INCLUDE_DIR:PATH=/usr/include
+
+//Path to the MPFR library
+MPFR_LIBRARIES:FILEPATH=MPFR_LIBRARIES-NOTFOUND
+
 //Value Computed by CMake
 mesh_gen_BINARY_DIR:STATIC=/mnt/d/New_Cgal_test_site/cpp/build-linux
 
@@ -212,6 +249,10 @@ mesh_gen_SOURCE_DIR:STATIC=/mnt/d/New_Cgal_test_site/cpp
 # INTERNAL cache entries
 ########################
 
+//ADVANCED property for variable: Boost_DEBUG
+Boost_DEBUG-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: CGAL_Boost_USE_STATIC_LIBS
+CGAL_Boost_USE_STATIC_LIBS-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_ADDR2LINE
 CMAKE_ADDR2LINE-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_AR

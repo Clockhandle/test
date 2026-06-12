@@ -255,7 +255,7 @@ int main()
     std::vector<Polyline>               holes;
     std::vector<Polyline>               breaklines;
     std::vector<std::array<double, 3>>  scatter;
-    double slope_threshold = 5.0;
+    double slope_threshold = 10.0;
 
     std::string tok;
     while (std::cin >> tok) {
