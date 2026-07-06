@@ -165,8 +165,8 @@ export function buildViaSolid(meshGroup) {
         const vachOuter = vachSorted[0];
         const truOuter  = truSorted[0];
 
-        drawDebugLoop(vachOuter, 0xff6600, solidGroup, 'Vach_Border');
-        drawDebugLoop(truOuter,  0x00ccff, solidGroup, 'Tru_Border');
+        // drawDebugLoop(vachOuter, 0xff6600, solidGroup, 'Vach_Border');
+        // drawDebugLoop(truOuter,  0x00ccff, solidGroup, 'Tru_Border');
 
         const vachClosed = isLoopClosed(vachOuter, vach.userData.rawVertices, vach.userData.rawTriangles);
         const truClosed  = isLoopClosed(truOuter,  tru.userData.rawVertices,  tru.userData.rawTriangles);
@@ -215,9 +215,8 @@ export function buildViaSolid(meshGroup) {
                 console.log(`    Hole ${hi}: no Trụ inner loop, projecting to z=${truAvgZ.toFixed(1)}`);
             }
 
-            drawDebugLoop(vHole, 0xff00ff, solidGroup, `Vach_Hole_${hi}`);
-            drawDebugLoop(tHole, 0x00ff88, solidGroup, `Tru_Hole_${hi}`);
-
+            // drawDebugLoop(vHole, 0xff00ff, solidGroup, `Vach_Hole_${hi}`);
+            // drawDebugLoop(tHole, 0x00ff88, solidGroup, `Tru_Hole_${hi}`);
             const holeGeom = stitchClosedLoops(vHole, tHole);
             if (holeGeom) {
                 const holeMesh = new THREE.Mesh(holeGeom, wallMat.clone());

@@ -42,9 +42,73 @@ export function createMeshHandler(rootDir) {
         const holes      = body.holes      || [];
         const breaklines = body.breaklines || [];
         const scatter    = body.scatter    || [];
+        const action     = typeof body.action === 'string' ? body.action : 'mesh';
+        const clip_plane = Array.isArray(body.clip_plane) && body.clip_plane.length === 4
+                           ? body.clip_plane.map(Number) : null;
+        const slice_axis = Array.isArray(body.slice_axis) && body.slice_axis.length === 3
+                           ? body.slice_axis.map(Number) : null;
+        const slice_step = typeof body.slice_step === 'number' && body.slice_step > 0
+                           ? body.slice_step : null;
         if (!Array.isArray(boundaries) || boundaries.length === 0) {
-            res.status(400).json({ ok: false, error: 'Request body must include non-empty "boundaries" array (closed loops).' });
-            return;
+            // clip_mesh / split_mesh don't use boundaries — they supply raw geometry.
+            if (action !== 'clip_mesh' && action !== 'split_mesh') {
+                res.status(400).json({ ok: false, error: 'Request body must include non-empty "boundaries" array (closed loops).' });
+                return;
+            }
+        }
+
+        // Build the stdin text payload.
+        // clip_mesh / split_mesh supply raw geometry instead of CDT polylines.
+        if (action === 'clip_mesh') {
+            const rawVerts = body.vertices  || [];
+            const rawTris  = body.triangles || [];
+            if (rawVerts.length === 0 || rawTris.length === 0) {
+                res.status(400).json({ ok: false, error: `${action} requires non-empty "vertices" and "triangles" arrays.` });
+                return;
+            }
+            if (!clip_plane) {
+                res.status(400).json({ ok: false, error: `${action} requires a "clip_plane" [a,b,c,d].` });
+                return;
+            }
+            const [a, b, c, d] = clip_plane;
+            if (![a, b, c, d].every(Number.isFinite)) {
+                res.status(400).json({ ok: false, error: 'Non-finite value in clip_plane.' });
+                return;
+            }
+            const rawLines = [`NUMVERTS ${rawVerts.length}`];
+            for (const v of rawVerts) {
+                const x = Number(v[0]), y = Number(v[1]), z = Number(v[2] ?? 0);
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                    res.status(400).json({ ok: false, error: 'Non-finite vertex in vertices.' });
+                    return;
+                }
+                rawLines.push(`${x} ${y} ${z}`);
+            }
+            rawLines.push(`NUMTRIS ${rawTris.length}`);
+            for (const t of rawTris) rawLines.push(`${t[0]} ${t[1]} ${t[2]}`);
+            rawLines.push(`CLIPPLANE ${a} ${b} ${c} ${d}`);
+            const t0 = Date.now();
+            const rawArgs = [`--mode=${action}`];
+            const child = spawn(exe, rawArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+            let stdout = '', stderr = '';
+            child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+            child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+            child.on('error', err => res.status(500).json({ ok: false, error: 'Failed to spawn mesh_gen: ' + err.message }));
+            child.on('close', code => {
+                const elapsed_ms = Date.now() - t0;
+                if (stderr) console.warn('[mesh_gen stderr]', stderr);
+                if (code !== 0) { res.status(500).json({ ok: false, error: `mesh_gen exited ${code}`, stderr: stderr.slice(0,2000), elapsed_ms }); return; }
+                try {
+                    const parsed = JSON.parse(stdout.trim());
+                    parsed.elapsed_ms = elapsed_ms;
+                    res.json(parsed);
+                } catch (e) {
+                    res.status(500).json({ ok: false, error: 'mesh_gen output was not valid JSON: ' + e.message, stdout_head: stdout.slice(0,500) });
+                }
+            });
+            child.stdin.write(rawLines.join('\n') + '\n');
+            child.stdin.end();
+            return; // handled — skip CDT pipeline below
         }
 
         // Build the stdin text payload.
@@ -104,10 +168,33 @@ export function createMeshHandler(rootDir) {
         if (typeof body.slope === 'number' && body.slope >= 0) {
             lines.push(`SLOPE ${body.slope}`);
         }
+        if ((action === 'clip' || action === 'split') && clip_plane) {
+            const [a, b, c, d] = clip_plane;
+            if (![a, b, c, d].every(Number.isFinite)) {
+                res.status(400).json({ ok: false, error: 'Non-finite value in clip_plane.' });
+                return;
+            }
+            lines.push(`CLIPPLANE ${a} ${b} ${c} ${d}`);
+        }
+        if (action === 'slice') {
+            if (!slice_axis || !slice_step) {
+                res.status(400).json({ ok: false, error: 'slice requires slice_axis [nx,ny,nz] and slice_step > 0.' });
+                return;
+            }
+            const [nx, ny, nz] = slice_axis;
+            if (![nx, ny, nz].every(Number.isFinite)) {
+                res.status(400).json({ ok: false, error: 'Non-finite value in slice_axis.' });
+                return;
+            }
+            lines.push(`SLICEAXIS ${nx} ${ny} ${nz}`);
+            lines.push(`SLICESTEP ${slice_step}`);
+        }
         const stdinPayload = lines.join('\n') + '\n';
 
         const t0 = Date.now();
-        const child = spawn(exe, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const args = ['clip_mesh', 'clip', 'split', 'slice'].includes(action)
+                     ? [`--mode=${action}`] : [];
+        const child = spawn(exe, args, { stdio: ['pipe', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
         child.stdout.on('data', d => { stdout += d.toString('utf8'); });

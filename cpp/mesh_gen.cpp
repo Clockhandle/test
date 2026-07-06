@@ -23,17 +23,33 @@
 //   BRLINE <K>        breakline polyline: K vertices as "x y z" (interior constraint;
 //                     triangles adjacent to this edge are exempt from slope filter)
 //   PT <x> <y> <z>    scatter free vertex (no constraint edges; improves surface detail)
+//   CLIPPLANE <a> <b> <c> <d>  clip plane (ax+by+cz+d=0); used only with --mode=clip.
+//                     The side where ax+by+cz+d > 0 is removed.
+//
+// Command-line flags:
+//   --mode=mesh      (default) CDT triangulation only.
+//   --mode=clip      CDT then PMP::clip — keeps the negative-side half (ax+by+cz+d ≤ 0).
+//   --mode=split     CDT then two PMP::clip passes — outputs BOTH halves as separate meshes.
+//   --mode=clip_mesh  skip CDT; clip a raw vertex+triangle mesh (NUMVERTS/NUMTRIS tokens).
+//   --mode=slice     CDT then CGAL::Polygon_mesh_slicer sweep.
+//                    Emits polyline JSON (not a mesh). Requires SLICEAXIS + SLICESTEP.
+//   SLICEAXIS <nx> <ny> <nz>  slice-plane normal (e.g. 0 0 1 = horizontal).
+//   SLICESTEP <d>             spacing between consecutive slice planes.
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 #include <CGAL/Constrained_triangulation_face_base_2.h>
 #include <CGAL/Triangulation_data_structure_2.h>
+#include <CGAL/Surface_mesh.h>
+#include <CGAL/Polygon_mesh_processing/clip.h>
+#include <CGAL/Polygon_mesh_slicer.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -52,6 +68,8 @@ using Point = CDT::Point;
 using VH    = CDT::Vertex_handle;
 
 using Polyline = std::vector<std::array<double, 3>>;
+using SMesh    = CGAL::Surface_mesh<K::Point_3>;
+namespace PMP  = CGAL::Polygon_mesh_processing;
 
 // ---- helpers ----
 
@@ -244,18 +262,88 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
     return out;
 }
 
+// ---- clip a MeshOut in-place using CGAL PMP::clip ----
+// Keeps the half-space where plane(v) <= 0  (ax+by+cz+d <= 0).
+// close_volume=true seals the cut boundary with a planar cap (needed for walls).
+// On failure (exception or empty result) the MeshOut is left unchanged.
+static void clip_meshout(MeshOut& m, const K::Plane_3& plane, bool close_volume = false)
+{
+    if (m.vertices.empty() || m.triangles.empty()) return;
+
+    SMesh sm;
+
+    // Populate vertices.
+    for (const auto& v : m.vertices)
+        sm.add_vertex(K::Point_3(v[0], v[1], v[2]));
+
+    // Populate triangular faces.
+    for (const auto& t : m.triangles) {
+        SMesh::Vertex_index v0(t[0]), v1(t[1]), v2(t[2]);
+        if (sm.add_face(v0, v1, v2) == SMesh::null_face())
+            std::cerr << "[clip] degenerate/non-manifold face skipped\n";
+    }
+
+    try {
+        // clip_volume controls whether the cut boundary is sealed with a planar cap.
+        // false = open surface (terrain); true = seal the cut (walls/solids).
+        PMP::clip(sm, plane, PMP::parameters::clip_volume(close_volume));
+    } catch (const std::exception& e) {
+        std::cerr << "[clip] PMP::clip threw: " << e.what() << " — mesh unchanged\n";
+        return;
+    }
+
+    sm.collect_garbage(); // compact lazy-deleted vertices/faces
+
+    // Extract clipped geometry back into MeshOut.
+    m.vertices.clear();
+    m.triangles.clear();
+
+    std::unordered_map<std::size_t, int> vmap;
+    vmap.reserve(sm.num_vertices());
+    for (auto v : sm.vertices()) {
+        vmap[v.idx()] = static_cast<int>(m.vertices.size());
+        const auto& p = sm.point(v);
+        m.vertices.push_back({ p.x(), p.y(), p.z() });
+    }
+    for (auto f : sm.faces()) {
+        auto h  = sm.halfedge(f);
+        int  i0 = vmap.at(CGAL::target(h,             sm).idx());
+        int  i1 = vmap.at(CGAL::target(sm.next(h),    sm).idx());
+        int  i2 = vmap.at(CGAL::target(sm.next(sm.next(h)), sm).idx());
+        m.triangles.push_back({ i0, i1, i2 });
+    }
+}
+
 // ---- main ----
 
-int main()
+int main(int argc, char** argv)
 {
     std::ios::sync_with_stdio(false);
+
+    // Parse --mode=<value> from command-line arguments.
+    std::string mode = "mesh";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg.rfind("--mode=", 0) == 0)
+            mode = arg.substr(7);
+    }
 
     std::vector<Polyline>               contours;
     std::vector<Polyline>               boundaries;
     std::vector<Polyline>               holes;
     std::vector<Polyline>               breaklines;
     std::vector<std::array<double, 3>>  scatter;
-    double slope_threshold = 10.0;
+    double slope_threshold = 15.0;
+    double clip_a = 0, clip_b = 0, clip_c = 0, clip_d = 0;
+    bool   clip_plane_set = false;
+
+    // Raw mesh input (for --mode=clip_mesh / split_mesh).
+    std::vector<std::array<double, 3>> raw_vertices;
+    std::vector<std::array<int,    3>> raw_triangles;
+
+    // Slice parameters (for --mode=slice).
+    double slice_nx = 0.0, slice_ny = 0.0, slice_nz = 1.0; // default: horizontal (+Z)
+    double slice_step = 5.0;
 
     std::string tok;
     while (std::cin >> tok) {
@@ -290,10 +378,76 @@ int main()
         } else if (tok == "PT") {
             double x, y, z; std::cin >> x >> y >> z;
             scatter.push_back({ x, y, z });
+        } else if (tok == "CLIPPLANE") {
+            std::cin >> clip_a >> clip_b >> clip_c >> clip_d;
+            clip_plane_set = true;
+        } else if (tok == "NUMVERTS") {
+            int n; std::cin >> n;
+            raw_vertices.reserve(raw_vertices.size() + static_cast<std::size_t>(std::max(0, n)));
+            for (int i = 0; i < n; ++i) {
+                double x, y, z; std::cin >> x >> y >> z;
+                raw_vertices.push_back({ x, y, z });
+            }
+        } else if (tok == "NUMTRIS") {
+            int n; std::cin >> n;
+            raw_triangles.reserve(raw_triangles.size() + static_cast<std::size_t>(std::max(0, n)));
+            for (int i = 0; i < n; ++i) {
+                int i0, i1, i2; std::cin >> i0 >> i1 >> i2;
+                raw_triangles.push_back({ i0, i1, i2 });
+            }
+        } else if (tok == "SLICEAXIS") {
+            std::cin >> slice_nx >> slice_ny >> slice_nz;
+        } else if (tok == "SLICESTEP") {
+            std::cin >> slice_step;
         } else {
             std::cerr << "[mesh_gen] Unknown token: '" << tok << "'\n";
             return 2;
         }
+    }
+
+    // ---- Raw mesh clip (--mode=clip_mesh) ----
+    // Skips the CDT pipeline entirely: takes pre-built vertices + triangles,
+    // clips them, and emits JSON. Used for wall meshes during Cut Shape.
+    if (mode == "clip_mesh") {
+        if (!clip_plane_set) {
+            std::cerr << "[mesh_gen] clip_mesh requires CLIPPLANE\n"; return 2;
+        }
+        if (raw_vertices.empty() || raw_triangles.empty()) {
+            std::cerr << "[mesh_gen] clip_mesh requires NUMVERTS + NUMTRIS\n"; return 2;
+        }
+
+        MeshOut base;
+        base.vertices  = raw_vertices;
+        base.triangles = raw_triangles;
+
+        const K::Plane_3 plane(clip_a, clip_b, clip_c, clip_d);
+        clip_meshout(base, plane, /*close_volume=*/false);
+        std::cerr << "[mesh_gen] clip_mesh: " << base.triangles.size() << " tris after clip\n";
+
+        std::ostringstream jout;
+        jout.precision(10);
+        jout << "{\"ok\":true,\"action_mode\":\"clip_mesh\""
+             << ",\"num_meshes\":1"
+             << ",\"num_contours\":0,\"num_boundaries\":0"
+             << ",\"num_orphan_contours\":0,\"num_input_vertices\":" << raw_vertices.size()
+             << ",\"num_warnings\":0,\"warnings\":[]"
+             << ",\"meshes\":[{\"num_contours\":0,\"num_holes\":0"
+             << ",\"dropped_slope\":0,\"dropped_hole\":0,\"slope_used\":0"
+             << ",\"num_vertices\":"  << base.vertices.size()
+             << ",\"num_triangles\":" << base.triangles.size()
+             << ",\"vertices\":[";
+        for (std::size_t k = 0; k < base.vertices.size(); ++k) {
+            if (k) jout << ",";
+            jout << "[" << base.vertices[k][0] << "," << base.vertices[k][1] << "," << base.vertices[k][2] << "]";
+        }
+        jout << "],\"triangles\":[";
+        for (std::size_t k = 0; k < base.triangles.size(); ++k) {
+            if (k) jout << ",";
+            jout << "[" << base.triangles[k][0] << "," << base.triangles[k][1] << "," << base.triangles[k][2] << "]";
+        }
+        jout << "]}]}";
+        std::cout << jout.str() << std::endl;
+        return 0;
     }
 
     // Assign each contour to the first boundary whose polygon contains it.
@@ -403,6 +557,137 @@ int main()
                   << "dropped_hole=" << meshes.back().dropped_hole << "\n";
     }
 
+    // ---- Clip pass (--mode=clip) ----
+    if (mode == "clip" && clip_plane_set) {
+        const K::Plane_3 plane(clip_a, clip_b, clip_c, clip_d);
+        int clipped = 0;
+        for (auto& m : meshes) { clip_meshout(m, plane); ++clipped; }
+        std::cerr << "[mesh_gen] clip pass: " << clipped << " mesh(es) clipped by plane ("
+                  << clip_a << " " << clip_b << " " << clip_c << " " << clip_d << ")\n";
+    }
+
+    // ---- Split pass (--mode=split) ----
+    // Each boundary mesh becomes two entries: negative-side half then positive-side half.
+    if (mode == "split" && clip_plane_set) {
+        const K::Plane_3 plane(clip_a, clip_b, clip_c, clip_d);
+        const K::Plane_3 opp   = plane.opposite();
+        std::vector<MeshOut> halves;
+        halves.reserve(meshes.size() * 2);
+        for (const auto& m : meshes) {
+            MeshOut neg = m; clip_meshout(neg, plane);  // keeps ax+by+cz+d <= 0
+            MeshOut pos = m; clip_meshout(pos, opp);    // keeps ax+by+cz+d >= 0
+            halves.push_back(std::move(neg));
+            halves.push_back(std::move(pos));
+        }
+        std::cerr << "[mesh_gen] split pass: " << meshes.size() << " mesh(es) → "
+                  << halves.size() << " halves\n";
+        meshes = std::move(halves);
+    }
+
+    // ---- Slice sweep (--mode=slice) ----
+    // Builds a combined Surface_mesh from all CDT boundary meshes, preprocesses it
+    // with CGAL::Polygon_mesh_slicer once, then sweeps parallel planes from min to max elevation.
+    if (mode == "slice") {
+        if (slice_step <= 0.0) {
+            std::cerr << "[mesh_gen] SLICESTEP must be > 0\n"; return 2;
+        }
+        // Normalise axis.
+        double axlen = std::sqrt(slice_nx*slice_nx + slice_ny*slice_ny + slice_nz*slice_nz);
+        if (axlen < 1e-12) { std::cerr << "[mesh_gen] SLICEAXIS is zero vector\n"; return 2; }
+        slice_nx /= axlen; slice_ny /= axlen; slice_nz /= axlen;
+
+        // Build combined Surface_mesh.
+        SMesh sm;
+        double dmin =  std::numeric_limits<double>::infinity();
+        double dmax = -std::numeric_limits<double>::infinity();
+        for (const auto& m : meshes) {
+            if (m.vertices.empty()) continue;
+            const std::size_t vbase = sm.number_of_vertices();
+            for (const auto& v : m.vertices) {
+                sm.add_vertex(K::Point_3(v[0], v[1], v[2]));
+                double d = slice_nx*v[0] + slice_ny*v[1] + slice_nz*v[2];
+                if (d < dmin) dmin = d;
+                if (d > dmax) dmax = d;
+            }
+            for (const auto& t : m.triangles)
+                sm.add_face(SMesh::Vertex_index(vbase + t[0]),
+                            SMesh::Vertex_index(vbase + t[1]),
+                            SMesh::Vertex_index(vbase + t[2]));
+        }
+        std::cerr << "[mesh_gen] slice: axis=(" << slice_nx << "," << slice_ny << "," << slice_nz
+                  << ") step=" << slice_step << " range=[" << dmin << "," << dmax << "]\n";
+
+        if (sm.is_empty()) {
+            std::cerr << "[mesh_gen] slice: no mesh geometry after CDT\n"; return 2;
+        }
+
+        // Preprocess mesh once — Slicer builds an AABB tree internally.
+        CGAL::Polygon_mesh_slicer<SMesh, K> slicer(sm);
+
+        struct SliceOut {
+            double level;
+            std::vector<std::vector<std::array<double,3>>> polylines;
+        };
+        std::vector<SliceOut> slice_results;
+
+        // Shift slice levels by a half-step so they never land on a survey vertex
+        // exactly.  CGAL::Polygon_mesh_slicer has undefined behaviour when a mesh
+        // vertex lies exactly on the cutting plane, which produces vertical spikes.
+        const double half_step = slice_step * 0.5;
+        double first = std::floor(dmin / slice_step) * slice_step + half_step;
+        if (first < dmin) first += slice_step;
+        for (double lv = first; lv <= dmax + 1e-9; lv += slice_step) {
+            K::Plane_3 plane(slice_nx, slice_ny, slice_nz, -lv);
+            std::vector<std::vector<K::Point_3>> raw_polys;
+            slicer(plane, std::back_inserter(raw_polys));
+            if (raw_polys.empty()) continue;
+            SliceOut so;
+            so.level = lv;
+            for (const auto& poly : raw_polys) {
+                if (poly.size() < 2) continue;
+                std::vector<std::array<double,3>> pts;
+                pts.reserve(poly.size());
+                for (const auto& p : poly)
+                    pts.push_back({ p.x(), p.y(), p.z() });
+                so.polylines.push_back(std::move(pts));
+            }
+            if (!so.polylines.empty())
+                slice_results.push_back(std::move(so));
+        }
+        std::cerr << "[mesh_gen] slice: " << slice_results.size() << " non-empty level(s)\n";
+
+        // Emit JSON.
+        std::ostringstream jout;
+        jout.precision(4); jout << std::fixed;
+        jout << "{\"ok\":true,\"action_mode\":\"slice\""
+             << ",\"axis\":[" << slice_nx << "," << slice_ny << "," << slice_nz << "]"
+             << ",\"step\":" << slice_step
+             << ",\"num_slices\":" << slice_results.size()
+             << ",\"slices\":[";
+        for (std::size_t si = 0; si < slice_results.size(); ++si) {
+            if (si) jout << ",";
+            const auto& s = slice_results[si];
+            jout << "{\"level\":" << s.level
+                 << ",\"num_polylines\":" << s.polylines.size()
+                 << ",\"polylines\":[";
+            for (std::size_t pi = 0; pi < s.polylines.size(); ++pi) {
+                if (pi) jout << ",";
+                jout << "[";
+                for (std::size_t vi = 0; vi < s.polylines[pi].size(); ++vi) {
+                    if (vi) jout << ",";
+                    jout << "[" << s.polylines[pi][vi][0]
+                         << "," << s.polylines[pi][vi][1]
+                         << "," << s.polylines[pi][vi][2] << "]";
+                }
+                jout << "]";
+            }
+            jout << "]}";
+        }
+        jout << "]}";
+        std::cout << jout.str() << std::endl;
+        return 0;
+    }
+
     // ---- Diagnostic warnings ----
     // Collect (a) orphan contours and (b) contours whose vertices stray outside
     // their assigned boundary.  Both cause fins/spikes in the output mesh.
@@ -437,6 +722,7 @@ int main()
     std::ostringstream out;
     out.precision(10);
     out << "{\"ok\":true"
+        << ",\"action_mode\":\"" << mode << "\""
         << ",\"num_contours\":"        << contours.size()
         << ",\"num_boundaries\":"      << boundaries.size()
         << ",\"num_orphan_contours\":" << orphans

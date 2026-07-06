@@ -9,6 +9,8 @@ import { setupMesher } from './mesh_generator.js';
 import { buildCgalMesh } from './cgal_mesher.js';
 import { buildViaSolid, computeViaSolidVolumes } from './via_solid.js';
 import { setupTypeToggles } from './type_toggles.js';
+import { setupClipTest } from './clip_test.js';
+import { buildSlice, renderSlices, exportDxf, AXIS_MAP } from './slicer_ui.js';
 
 let geometry, camera, line, scene, meshGroup
 const rawDataSegments = []; // Keep a reference to the untouched original lines
@@ -44,8 +46,10 @@ function initThreeJS() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(window.devicePixelRatio);
   
-  // We MUST turn autoClear off so the corner widget doesn't erase the main scene when it renders
+  renderer.localClippingEnabled = true; 
   renderer.autoClear = false;
+
+  scene.userData.renderer = renderer;
 
   const controls = new OrbitControls(camera, renderer.domElement);
   // Optional but nice: Adds smooth drifting when you stop dragging
@@ -57,7 +61,6 @@ function initThreeJS() {
 
   // ----- FAST Z-LAYER STITCHING LOGIC -----
   setupMesher(scene, rawDataSegments);
-  // -------------------------------
 
   // ----- CGAL MESH BUTTON -----
   const cgalBtn = document.getElementById('cgal-mesh-btn');
@@ -79,6 +82,42 @@ function initThreeJS() {
   if (viaVolumeBtn) {
     viaVolumeBtn.addEventListener('click', () => computeViaSolidVolumes(meshGroup));
   }
+  // ----- SLICE BUTTON -----
+  let lastSliceData = null;
+  const sliceBtn      = document.getElementById('slice-btn');
+  const exportDxfBtn  = document.getElementById('export-dxf-btn');
+  if (sliceBtn) {
+    sliceBtn.addEventListener('click', async () => {
+      const axisKey = document.getElementById('slice-axis')?.value || 'z+';
+      const step    = parseFloat(document.getElementById('slice-step')?.value) || 5.0;
+      const axis    = AXIS_MAP[axisKey] || [0, 0, 1];
+      sliceBtn.disabled  = true;
+      sliceBtn.innerText = 'Slicing…';
+      try {
+        lastSliceData = await buildSlice(rawDataSegments, { axis, step });
+        if (lastSliceData) {
+          renderSlices(lastSliceData, meshGroup);
+          if (exportDxfBtn) {
+            exportDxfBtn.disabled        = false;
+            exportDxfBtn.style.opacity   = '1';
+          }
+        }
+      } catch (e) {
+        alert('Slice failed: ' + e.message);
+      } finally {
+        sliceBtn.disabled  = false;
+        sliceBtn.innerText = 'Slice';
+      }
+    });
+  }
+  if (exportDxfBtn) {
+    exportDxfBtn.addEventListener('click', () => {
+      if (!lastSliceData) return;
+      const axisKey = document.getElementById('slice-axis')?.value || 'z+';
+      const axis    = AXIS_MAP[axisKey] || [0, 0, 1];
+      exportDxf(lastSliceData, { axis, filename: `contours_${axisKey}.dxf` });
+    });
+  }
   // -------------------------------
 
 // Material
@@ -91,6 +130,20 @@ function initThreeJS() {
   scene.userData.meshGroup = meshGroup;
 
   // Initialize the boundary drawer module
+  setupClipTest(rawDataSegments, renderer, meshGroup);
+
+  // Toggle visibility of all imported contour lines.
+  const toggleLinesBtn = document.getElementById('toggle-lines-btn');
+  if (toggleLinesBtn) {
+    let linesVisible = true;
+    toggleLinesBtn.addEventListener('click', () => {
+      linesVisible = !linesVisible;
+      for (const c of [...meshGroup.children])
+        if (c.isLine) c.visible = linesVisible;
+      toggleLinesBtn.innerText  = linesVisible ? 'Hide Lines' : 'Show Lines';
+      toggleLinesBtn.style.background = linesVisible ? '#555' : '#222';
+    });
+  }
   setupBoundaryDrawer(scene, camera, controls, meshGroup);
   setupTypeToggles(scene);
 
@@ -153,28 +206,25 @@ function handleNewPoints(arrayOfLineSegments) {
 
   const centerBox = new THREE.Box3(); // To calculate total bounds
 
-  // 2. Loop through each independent array of points (each layer/segment)
   arrayOfLineSegments.forEach((segmentArray, index) => {
     
-    // Create a distinctive color that pops for each line using HSL (Hue, Saturation, Lightness)
-    // By dividing the current index by the total length, we sweep cleanly across the full rainbow
     const hue = (index / arrayOfLineSegments.length) * 360; 
     let layerMaterial;
     
-    // If it's a boundary line, we make it bold and white so it heavily stands out
     if (segmentArray.isBoundary) {
       layerMaterial = new THREE.LineBasicMaterial({
          color: 0xffffff,
-         linewidth: 3 // Note: WebGL usually clamps this to 1 on Windows, but the color change will be stark
+         linewidth: 3,
       });
     } else {
       layerMaterial = new THREE.LineBasicMaterial({
-        color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`) // 100% saturation, 65% lightness
+        color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`),
       });
     }
 
-    // Create an independent geometry for exactly this block of points
     const newGeom = new THREE.BufferGeometry().setFromPoints(segmentArray);
+    
+    // ... rest of your code ...
     
     // Add that geometry bounding box into our 'total scene bounds' calculation
     newGeom.computeBoundingBox();

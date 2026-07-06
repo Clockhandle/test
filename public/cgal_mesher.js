@@ -42,7 +42,7 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
                 // Multi-vertex Bề mặt polyline → treat as a contour line with edge constraints.
                 g.polylines.push(poly);
             }
-        } else                    g.polylines.push(poly);
+        } else g.polylines.push(poly);
     }
 
     // For groups with no boundary, synthesise a convex hull boundary from all
@@ -130,6 +130,8 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
             if (g.breaklines.length > 0)  payload.breaklines = g.breaklines;
             if (g.scatter.length > 0) payload.scatter = g.scatter;
             if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
+            if (typeof opts.action === 'string')                    payload.action = opts.action;
+            if (Array.isArray(opts.clip_plane))                     payload.clip_plane = opts.clip_plane;
             const resp = await fetch('/api/mesh', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

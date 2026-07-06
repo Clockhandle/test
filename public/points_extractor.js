@@ -27,7 +27,7 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === '3D Polyline' || 
                            meshItem.Type === 'Boundary';
         const isHole      = meshItem.IsHole      === true;
-        const isBreakLine = meshItem.IsBreakLine === true || meshItem.IsBreakline === true;
+        const isBreakLine = meshItem.IsBreakLine === true;
         const blockName = meshItem.BlockName || null;
         const viaName   = meshItem.ViaName   || null;
         const handle    = meshItem.Handle    || null;  // AutoCAD entity handle (hex, e.g. "2F4A")
