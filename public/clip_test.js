@@ -74,6 +74,33 @@ async function clipWallMeshes(clip_plane, meshGroup) {
 }
 
 export function setupClipTest(rawDataSegments, renderer, meshGroup) {
+    // ── Fault / polyline split ────────────────────────────────────────────────
+    const faultSplitBtn = document.getElementById('fault-split-btn');
+    if (faultSplitBtn) {
+        faultSplitBtn.addEventListener('click', async () => {
+            if (!rawDataSegments || rawDataSegments.length === 0) {
+                alert('Upload a JSON dataset first!'); return;
+            }
+            // Collect all breakline segments (Đứt gãy / IsBreakline).
+            const breaklines = rawDataSegments
+                .filter(seg => seg.isBreakLine && seg.length >= 2)
+                .map(seg => seg.map(v => [v.x, v.y, v.z]));
+            if (breaklines.length === 0) {
+                alert('No breakline (Đứt gãy) segments found in the dataset.'); return;
+            }
+            const orig = faultSplitBtn.innerText;
+            faultSplitBtn.disabled  = true;
+            faultSplitBtn.innerText = 'Splitting…';
+            try {
+                await buildCgalMesh(rawDataSegments, meshGroup, { action: 'polyline_split' });
+                buildViaSolid(meshGroup);
+            } finally {
+                faultSplitBtn.disabled  = false;
+                faultSplitBtn.innerText = orig;
+            }
+        });
+    }
+
     const cutBtn = document.getElementById('cut-mesh-btn');
     if (!cutBtn) return;
 

@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/mnt/d/New_Cgal_test_site/cpp/build-linux/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

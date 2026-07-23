@@ -11,6 +11,7 @@ import { buildViaSolid, computeViaSolidVolumes } from './via_solid.js';
 import { setupTypeToggles } from './type_toggles.js';
 import { setupClipTest } from './clip_test.js';
 import { buildSlice, renderSlices, exportDxf, AXIS_MAP } from './slicer_ui.js';
+import { buildDuongLoMesh } from './duong_lo_mesher.js';
 
 let geometry, camera, line, scene, meshGroup
 const rawDataSegments = []; // Keep a reference to the untouched original lines
@@ -81,6 +82,11 @@ function initThreeJS() {
   const viaVolumeBtn = document.getElementById('via-volume-btn');
   if (viaVolumeBtn) {
     viaVolumeBtn.addEventListener('click', () => computeViaSolidVolumes(meshGroup));
+  }
+  // ----- BUILD LO BUTTON -----
+  const buildLoBtn = document.getElementById('build-lo-btn');
+  if (buildLoBtn) {
+    buildLoBtn.addEventListener('click', () => buildDuongLoMesh(rawDataSegments, meshGroup));
   }
   // ----- SLICE BUTTON -----
   let lastSliceData = null;
@@ -211,7 +217,15 @@ function handleNewPoints(arrayOfLineSegments) {
     const hue = (index / arrayOfLineSegments.length) * 360; 
     let layerMaterial;
     
-    if (segmentArray.isBoundary) {
+    if (segmentArray.isDuongLo) {
+      // Mine-tunnel skeleton: colour by layer type
+      //   Nền (floor) = orange, Nóc (roof) = cyan, Biên (wall) = light grey
+      const duongLoColor =
+          segmentArray.duongLoLayer === 'nen'  ? 0xff8800 :
+          segmentArray.duongLoLayer === 'noc'  ? 0x00ddff :
+          segmentArray.duongLoLayer === 'bien' ? 0xcccccc : 0xffffff;
+      layerMaterial = new THREE.LineBasicMaterial({ color: duongLoColor, depthTest: false });
+    } else if (segmentArray.isBoundary) {
       layerMaterial = new THREE.LineBasicMaterial({
          color: 0xffffff,
          linewidth: 3,
@@ -233,7 +247,9 @@ function handleNewPoints(arrayOfLineSegments) {
 
     // Create an independent line, then add it to our parent mesh group!
     const newLine = new THREE.Line(newGeom, layerMaterial);
-    if (segmentArray.featureType) newLine.userData.featureType = segmentArray.featureType;
+    if (segmentArray.featureType)  newLine.userData.featureType  = segmentArray.featureType;
+    if (segmentArray.isDuongLo)    newLine.userData.isDuongLo    = true;
+    if (segmentArray.duongLoLayer) newLine.userData.duongLoLayer = segmentArray.duongLoLayer;
     meshGroup.add(newLine);
   });
 

@@ -21,6 +21,7 @@ function locateBinary(rootDir) {
         path.join(rootDir, 'cpp', 'build', 'Debug', 'mesh_gen.exe'),
         path.join(rootDir, 'cpp', 'build', 'mesh_gen.exe'),
         path.join(rootDir, 'cpp', 'build', 'mesh_gen'),
+        path.join(rootDir, 'cpp', 'build-linux', 'mesh_gen'),
     ];
     return candidates.find(p => fs.existsSync(p));
 }
@@ -112,11 +113,13 @@ export function createMeshHandler(rootDir) {
         }
 
         // Build the stdin text payload.
+        const fault_lines  = Array.isArray(body.fault_lines) ? body.fault_lines : [];
         const lines = [];
         lines.push(`POLYLINES ${polylines.length}`);
         lines.push(`BOUNDARIES ${boundaries.length}`);
         lines.push(`HOLES ${holes.length}`);
         lines.push(`BREAKLINES ${breaklines.length}`);
+        lines.push(`FAULTLINES ${fault_lines.length}`);
         lines.push(`SCATTER ${scatter.length}`);
         let totalVerts = 0;
 
@@ -156,6 +159,12 @@ export function createMeshHandler(rootDir) {
                 return;
             }
         }
+        for (const poly of fault_lines) {
+            if (!writePoly('FAULTLINE', poly)) {
+                res.status(400).json({ ok: false, error: 'Non-finite vertex in fault_lines.' });
+                return;
+            }
+        }
         for (const pt of scatter) {
             const x = Number(pt[0]), y = Number(pt[1]), z = Number(pt[2] ?? 0);
             if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
@@ -192,7 +201,7 @@ export function createMeshHandler(rootDir) {
         const stdinPayload = lines.join('\n') + '\n';
 
         const t0 = Date.now();
-        const args = ['clip_mesh', 'clip', 'split', 'slice'].includes(action)
+        const args = ['clip_mesh', 'clip', 'split', 'slice', 'polyline_split'].includes(action)
                      ? [`--mode=${action}`] : [];
         const child = spawn(exe, args, { stdio: ['pipe', 'pipe', 'pipe'] });
         let stdout = '';

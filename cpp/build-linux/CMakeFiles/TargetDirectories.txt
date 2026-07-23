@@ -1,0 +1,3 @@
+/mnt/d/New_Cgal_test_site/cpp/build-linux/CMakeFiles/mesh_gen.dir
+/mnt/d/New_Cgal_test_site/cpp/build-linux/CMakeFiles/edit_cache.dir
+/mnt/d/New_Cgal_test_site/cpp/build-linux/CMakeFiles/rebuild_cache.dir

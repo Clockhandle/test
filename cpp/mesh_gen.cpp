@@ -43,6 +43,8 @@
 #include <CGAL/Triangulation_data_structure_2.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/clip.h>
+#include <CGAL/Polygon_mesh_processing/corefinement.h>
+#include <CGAL/Polygon_mesh_processing/connected_components.h>
 #include <CGAL/Polygon_mesh_slicer.h>
 
 #include <algorithm>
@@ -332,6 +334,7 @@ int main(int argc, char** argv)
     std::vector<Polyline>               boundaries;
     std::vector<Polyline>               holes;
     std::vector<Polyline>               breaklines;
+    std::vector<Polyline>               fault_polylines; // cutting tools only — never CDT constraints
     std::vector<std::array<double, 3>>  scatter;
     double slope_threshold = 15.0;
     double clip_a = 0, clip_b = 0, clip_c = 0, clip_d = 0;
@@ -366,6 +369,9 @@ int main(int argc, char** argv)
         } else if (tok == "BREAKLINES" || tok == "SCATTER") {
             int n; std::cin >> n;
             (void)n;
+        } else if (tok == "FAULTLINES") {
+            int n; std::cin >> n;
+            (void)n;
         } else if (tok == "BRLINE") {
             int k; std::cin >> k;
             Polyline poly;
@@ -375,6 +381,15 @@ int main(int argc, char** argv)
                 poly.push_back({ x, y, z });
             }
             breaklines.push_back(std::move(poly));
+        } else if (tok == "FAULTLINE") {
+            int k; std::cin >> k;
+            Polyline poly;
+            poly.reserve(static_cast<std::size_t>(std::max(0, k)));
+            for (int i = 0; i < k; ++i) {
+                double x, y, z; std::cin >> x >> y >> z;
+                poly.push_back({ x, y, z });
+            }
+            fault_polylines.push_back(std::move(poly));
         } else if (tok == "PT") {
             double x, y, z; std::cin >> x >> y >> z;
             scatter.push_back({ x, y, z });
@@ -582,6 +597,188 @@ int main(int argc, char** argv)
         std::cerr << "[mesh_gen] split pass: " << meshes.size() << " mesh(es) → "
                   << halves.size() << " halves\n";
         meshes = std::move(halves);
+    }
+
+    // ---- Polyline split (--mode=polyline_split) ----
+    // Splits the combined CDT terrain along a fault/breakline polyline.
+    // Each BRLINE is extruded into a tall vertical curtain wall; PMP::corefine
+    // inserts intersection edges into the terrain, then connected_components
+    // separates the two halves.
+    if (mode == "polyline_split") {
+        if (breaklines.empty() && fault_polylines.empty()) {
+            std::cerr << "[mesh_gen] polyline_split: no BRLINE/FAULTLINE data supplied\n";
+            return 2;
+        }
+
+        // Prefer fault_polylines (cutting tools only, no CDT contamination);
+        // fall back to breaklines if no FAULTLINE tokens were sent.
+        const std::vector<Polyline>& cutting_lines =
+            !fault_polylines.empty() ? fault_polylines : breaklines;
+
+        // Build combined terrain SMesh.
+        SMesh sm;
+        double zmin =  std::numeric_limits<double>::infinity();
+        double zmax = -std::numeric_limits<double>::infinity();
+        for (const auto& m : meshes) {
+            if (m.vertices.empty()) continue;
+            const std::size_t vbase = sm.number_of_vertices();
+            for (const auto& v : m.vertices) {
+                sm.add_vertex(K::Point_3(v[0], v[1], v[2]));
+                if (v[2] < zmin) zmin = v[2];
+                if (v[2] > zmax) zmax = v[2];
+            }
+            for (const auto& t : m.triangles)
+                sm.add_face(SMesh::Vertex_index(vbase + t[0]),
+                            SMesh::Vertex_index(vbase + t[1]),
+                            SMesh::Vertex_index(vbase + t[2]));
+        }
+        if (sm.is_empty()) {
+            std::cerr << "[mesh_gen] polyline_split: no mesh geometry after CDT\n";
+            return 2;
+        }
+
+        const double zmargin = (zmax - zmin) * 0.5 + 1.0;
+        const double z_bot   = zmin - zmargin;
+        const double z_top   = zmax + zmargin;
+
+        // For each breakline, build a tall vertical curtain wall and corefine.
+        for (const auto& bl : cutting_lines) {
+            const int N = static_cast<int>(bl.size());
+            if (N < 2) continue;
+
+            // Detect a closed loop: JS appends a copy of the first vertex at the
+            // end for IsClosed fault lines.  If the last vertex ≈ the first, build
+            // the cylinder using N-1 unique points + a wrap-around closing quad so
+            // the wall is a proper manifold surface.  Using N separate vertices at
+            // the seam creates two coincident-but-distinct edges that make the wall
+            // non-manifold and break PMP::split's inner/outer separation.
+            const bool closed_loop =
+                N >= 4 &&
+                std::abs(bl[0][0] - bl[N-1][0]) < 1e-6 &&
+                std::abs(bl[0][1] - bl[N-1][1]) < 1e-6;
+            const int wall_pts = closed_loop ? N - 1 : N;
+
+            SMesh wall;
+            std::vector<SMesh::Vertex_index> wbot, wtop;
+            wbot.reserve(wall_pts);  wtop.reserve(wall_pts);
+            for (int i = 0; i < wall_pts; ++i) {
+                wbot.push_back(wall.add_vertex(K::Point_3(bl[i][0], bl[i][1], z_bot)));
+                wtop.push_back(wall.add_vertex(K::Point_3(bl[i][0], bl[i][1], z_top)));
+            }
+            for (int i = 0; i < wall_pts - 1; ++i) {
+                wall.add_face(wbot[i], wbot[i+1], wtop[i]);
+                wall.add_face(wbot[i+1], wtop[i+1], wtop[i]);
+            }
+            // Wrap-around closing quad for closed loops — reuses wbot[0]/wtop[0].
+            if (closed_loop) {
+                wall.add_face(wbot[wall_pts-1], wbot[0], wtop[wall_pts-1]);
+                wall.add_face(wbot[0],          wtop[0], wtop[wall_pts-1]);
+            }
+
+            std::cerr << "[mesh_gen] polyline_split: splitting with wall ("
+                      << wall_pts << " pts, "
+                      << (closed_loop ? "closed" : "open") << ")\n";
+            try {
+                PMP::split(sm, wall);
+            } catch (const std::exception& e) {
+                std::cerr << "[mesh_gen] polyline_split: split threw: " << e.what() << "\n";
+                return 2;
+            }
+        }
+
+        // Separate into connected components.
+        auto comp_id = sm.add_property_map<SMesh::Face_index, std::size_t>("f:comp", 0).first;
+        const std::size_t ncomp = PMP::connected_components(sm, comp_id);
+        std::cerr << "[mesh_gen] polyline_split: " << ncomp << " component(s)\n";
+
+        // Extract each component.
+        std::vector<MeshOut> split_meshes(ncomp);
+        for (std::size_t c = 0; c < ncomp; ++c) {
+            MeshOut& out = split_meshes[c];
+            std::unordered_map<std::size_t, int> vmap;
+            for (auto f : sm.faces()) {
+                if (comp_id[f] != c) continue;
+                auto h = sm.halfedge(f);
+                std::array<int,3> tri;
+                for (int vi = 0; vi < 3; ++vi) {
+                    auto v = CGAL::target(h, sm);
+                    auto it = vmap.find(v.idx());
+                    if (it == vmap.end()) {
+                        const auto& p = sm.point(v);
+                        int idx = static_cast<int>(out.vertices.size());
+                        out.vertices.push_back({ p.x(), p.y(), p.z() });
+                        vmap[v.idx()] = idx;
+                        tri[vi] = idx;
+                    } else {
+                        tri[vi] = it->second;
+                    }
+                    h = sm.next(h);
+                }
+                out.triangles.push_back(tri);
+            }
+        }
+        split_meshes.erase(
+            std::remove_if(split_meshes.begin(), split_meshes.end(),
+                           [](const MeshOut& m){ return m.triangles.empty(); }),
+            split_meshes.end());
+
+        // ── Debug summary ─────────────────────────────────────────────────────
+        std::cerr << "[mesh_gen] polyline_split: " << split_meshes.size()
+                  << " non-empty component(s) extracted\n";
+        for (std::size_t mi = 0; mi < split_meshes.size(); ++mi) {
+            const auto& m = split_meshes[mi];
+            double x0 =  std::numeric_limits<double>::infinity(), x1 = -x0;
+            double y0 =  std::numeric_limits<double>::infinity(), y1 = -y0;
+            double z0 =  std::numeric_limits<double>::infinity(), z1 = -z0;
+            for (const auto& v : m.vertices) {
+                if (v[0] < x0) x0 = v[0]; if (v[0] > x1) x1 = v[0];
+                if (v[1] < y0) y0 = v[1]; if (v[1] > y1) y1 = v[1];
+                if (v[2] < z0) z0 = v[2]; if (v[2] > z1) z1 = v[2];
+            }
+            double cx = (x0 + x1) * 0.5, cy = (y0 + y1) * 0.5;
+            std::cerr << "  component " << mi
+                      << ": " << m.vertices.size() << " verts"
+                      << ", " << m.triangles.size() << " tris"
+                      << "  bbox X[" << x0 << "," << x1 << "]"
+                      <<       " Y[" << y0 << "," << y1 << "]"
+                      <<       " Z[" << z0 << "," << z1 << "]"
+                      << "  centroid XY(" << cx << "," << cy << ")\n";
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
+        // Emit JSON.
+        std::ostringstream jout;
+        jout.precision(10);
+        jout << "{\"ok\":true,\"action_mode\":\"polyline_split\""
+             << ",\"num_meshes\":" << split_meshes.size()
+             << ",\"num_contours\":0,\"num_boundaries\":0"
+             << ",\"num_orphan_contours\":0,\"num_input_vertices\":0"
+             << ",\"num_warnings\":0,\"warnings\":[]"
+             << ",\"meshes\":[";
+        for (std::size_t mi = 0; mi < split_meshes.size(); ++mi) {
+            if (mi) jout << ",";
+            const auto& m = split_meshes[mi];
+            jout << "{\"num_contours\":0,\"num_holes\":0"
+                 << ",\"dropped_slope\":0,\"dropped_hole\":0,\"slope_used\":0"
+                 << ",\"num_vertices\":"  << m.vertices.size()
+                 << ",\"num_triangles\":" << m.triangles.size()
+                 << ",\"vertices\":[";
+            for (std::size_t k = 0; k < m.vertices.size(); ++k) {
+                if (k) jout << ",";
+                jout << "[" << m.vertices[k][0] << "," << m.vertices[k][1]
+                     << "," << m.vertices[k][2] << "]";
+            }
+            jout << "],\"triangles\":[";
+            for (std::size_t k = 0; k < m.triangles.size(); ++k) {
+                if (k) jout << ",";
+                jout << "[" << m.triangles[k][0] << ","
+                     << m.triangles[k][1] << "," << m.triangles[k][2] << "]";
+            }
+            jout << "]}";
+        }
+        jout << "]}";
+        std::cout << jout.str() << std::endl;
+        return 0;
     }
 
     // ---- Slice sweep (--mode=slice) ----

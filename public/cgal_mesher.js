@@ -22,6 +22,7 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     const groups = new Map();  // key -> { viaName, featureType, blockName, polylines[], boundaries[], holes[] }
     for (const seg of rawDataSegments) {
         if (!seg || seg.length === 0) continue;
+        if (seg.isDuongLo) continue;  // mine-path lines — render only, never mesh
         const via  = seg.viaName     || '__default__';
         const ft   = seg.featureType || '__other__';
         const blk  = seg.blockName   || '__default__';
@@ -47,8 +48,11 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
 
     // For groups with no boundary, synthesise a convex hull boundary from all
     // their XY vertices, padded slightly outward, so the C++ mesher can still run.
+    // Exception: groups with ONLY breaklines (e.g. Đứt gãy fault lines) are never
+    // triangulated — they exist solely as cutting tools for polyline_split.
     for (const g of groups.values()) {
         if (g.boundaries.length > 0) continue;
+        if (g.polylines.length === 0 && g.scatter.length === 0) continue; // fault-only, skip
         // Collect all XY points + Z for this group.
         const pts = [];
         let minZ = Infinity, maxZ = -Infinity;
@@ -121,16 +125,48 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         return;
     }
 
+    // For polyline_split: build a per-(viaName, blockName) map of fault breaklines.
+    // A fault only cuts the surface groups it belongs to — other blocks are meshed
+    // normally so unrelated parts of the map are never touched.
+    const faultByViaBlock = new Map(); // "via||block" → [fault polylines]
+    if (opts.action === 'polyline_split') {
+        for (const g of groups.values()) {
+            if (g.polylines.length === 0 && g.scatter.length === 0 && g.boundaries.length === 0
+                    && g.breaklines.length > 0) {
+                const key = `${g.viaName || '__default__'}||${g.blockName || '__default__'}`;
+                if (!faultByViaBlock.has(key)) faultByViaBlock.set(key, []);
+                faultByViaBlock.get(key).push(...g.breaklines);
+            }
+        }
+        if (faultByViaBlock.size === 0) {
+            alert('No fault breaklines (Đứt gãy) found — add IsBreakline segments to the dataset.');
+            return;
+        }
+    }
+
     const t0 = performance.now();
     let results;
     try {
         results = await Promise.all(meshableGroups.map(async g => {
             const payload = { polylines: g.polylines, boundaries: g.boundaries };
-            if (g.holes.length > 0)       payload.holes      = g.holes;
-            if (g.breaklines.length > 0)  payload.breaklines = g.breaklines;
+            if (g.holes.length > 0) payload.holes = g.holes;
+            // Regular breaklines stay as CDT constraints (BRLINE tokens).
+            if (g.breaklines.length > 0) payload.breaklines = g.breaklines;
+
+            // For polyline_split: only inject fault breaklines that share this
+            // group's viaName + blockName.  Groups with no matching fault fall back
+            // to normal CDT meshing so they are left uncut.
+            const groupKey = `${g.viaName || '__default__'}||${g.blockName || '__default__'}`;
+            const matchingFaults = opts.action === 'polyline_split'
+                ? (faultByViaBlock.get(groupKey) || []) : [];
+            if (matchingFaults.length > 0) payload.fault_lines = matchingFaults;
+
+            const groupAction = (opts.action === 'polyline_split' && matchingFaults.length > 0)
+                ? 'polyline_split' : (opts.action || 'mesh');
+
             if (g.scatter.length > 0) payload.scatter = g.scatter;
             if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
-            if (typeof opts.action === 'string')                    payload.action = opts.action;
+            payload.action = groupAction;
             if (Array.isArray(opts.clip_plane))                     payload.clip_plane = opts.clip_plane;
             const resp = await fetch('/api/mesh', {
                 method: 'POST',

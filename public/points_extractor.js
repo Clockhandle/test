@@ -27,21 +27,33 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === '3D Polyline' || 
                            meshItem.Type === 'Boundary';
         const isHole      = meshItem.IsHole      === true;
-        const isBreakLine = meshItem.IsBreakLine === true;
-        const blockName = meshItem.BlockName || null;
-        const viaName   = meshItem.ViaName   || null;
+        const isBreakLine = meshItem.IsBreakLine === true || meshItem.IsBreakline === true;
+        // VungName / Name are the region-block equivalents of ViaName / BlockName.
+        const blockName = meshItem.BlockName || meshItem.Name     || null;
+        const viaName   = meshItem.ViaName   || meshItem.VungName || null;
         const handle    = meshItem.Handle    || null;  // AutoCAD entity handle (hex, e.g. "2F4A")
         const layer     = meshItem.Layer     || null;  // AutoCAD layer name
 
-        // Normalise the Type string to a simple ASCII key for featureType.
-        const rawType = (meshItem.Type || '').normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '').toLowerCase();
-        const featureType = rawType.includes('vach') ? 'vach'
-                          : rawType.includes('tru')  ? 'tru'
-                          : (rawType.includes('be mat') || rawType.includes('bemat')) ? 'bemat'
-                          : null;
+        // Normalise Type AND SurfaceType to derive featureType.
+        // SurfaceType ("Vách" / "Trụ") is used by Vùng giới hạn region blocks
+        // in place of embedding the surface role inside the Type string.
+        const rawType        = (meshItem.Type        || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const rawSurfaceType = (meshItem.SurfaceType || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const featureType =
+            (rawType.includes('vach') || rawSurfaceType.includes('vach')) ? 'vach'
+          : (rawType.includes('tru')  || rawSurfaceType.includes('tru'))  ? 'tru'
+          : (rawType.includes('be mat') || rawType.includes('bemat'))      ? 'bemat'
+          : null;
         const isBemat = featureType === 'bemat';
-
+        // Mine-tunnel skeleton lines (Địa hình lò).
+        // Detection: check for 'hinh lo' in the normalised type (the leading 'Đ'
+        // is U+0110 and does NOT decompose under NFD, so 'dia hinh lo' never
+        // matches — use 'hinh lo' instead), or fall back to the LayerType field
+        // which is only present on duong-lo records.
+        const isDuongLo    = rawType.includes('hinh lo') || !!meshItem.LayerType;
+        const duongLoLayer = isDuongLo
+            ? (meshItem.LayerType || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+            : null;
         meshItem.FlattenedVertices.forEach(vertex => {
           const x = vertex[0];
           const y = vertex[1];
@@ -56,12 +68,15 @@ export async function setupFileInput(onDataLoaded) {
           // ─────────────────────────────────────────────────────────────
           
           // If the Z value changes, start a new line segment
-          // (holes and boundaries are 3D closed loops — never split them)
-          if (!isBoundary && !isHole && !isBreakLine && !isBemat && currentZ !== null && currentZ !== z) {
+          // (holes, boundaries, breaklines, bemat, and mine-path lines are 3-D
+          // continuous paths that must never be split by Z-layer logic)
+          if (!isBoundary && !isHole && !isBreakLine && !isBemat && !isDuongLo && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
               currentSegment.isBoundary  = false;
               currentSegment.isBreakLine = isBreakLine;
               currentSegment.isBemat     = isBemat;
+              currentSegment.isDuongLo   = isDuongLo;
+              currentSegment.duongLoLayer = duongLoLayer;
               currentSegment.featureType = featureType;
               currentSegment.blockName   = blockName;
               currentSegment.viaName     = viaName;
@@ -77,10 +92,23 @@ export async function setupFileInput(onDataLoaded) {
         });
         
         if (currentSegment.length > 0) {
+          // For closed Đứt gãy fault lines (IsClosed:true), the CAD data does not
+          // repeat the first vertex — add it explicitly so the cutting wall becomes
+          // a closed cylinder for polyline_split instead of an open curtain.
+          // Note: 'Đứt gãy' normalises to 'đut gay'; use 'ut gay' to avoid the
+          // non-decomposable Đ/đ character.
+          const isClosed  = meshItem.IsClosed === true;
+          const isDutGay  = rawType.includes('ut gay');
+          if (isDutGay && isClosed && currentSegment.length >= 2) {
+              const first = currentSegment[0];
+              currentSegment.push(new THREE.Vector3(first.x, first.y, first.z));
+          }
           currentSegment.isBoundary  = isBoundary;
           currentSegment.isHole      = isHole;
           currentSegment.isBreakLine = isBreakLine;
           currentSegment.isBemat     = isBemat;
+          currentSegment.isDuongLo   = isDuongLo;
+          currentSegment.duongLoLayer = duongLoLayer;
           currentSegment.featureType = featureType;
           currentSegment.blockName   = blockName;
           currentSegment.viaName     = viaName;
