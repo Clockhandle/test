@@ -28,15 +28,24 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === 'Boundary';
         const isHole      = meshItem.IsHole      === true;
         const isBreakLine = meshItem.IsBreakLine === true || meshItem.IsBreakline === true;
-        // VungName / Name are the region-block equivalents of ViaName / BlockName.
-        const blockName = meshItem.BlockName || meshItem.Name     || null;
-        const viaName   = meshItem.ViaName   || meshItem.VungName || null;
+
+        // Vùng giới hạn region blocks are now identified by the explicit boolean
+        // flag IsVungGioiHan rather than by string-matching the Type field.
+        // When the flag is set, VungName / Name are the grouping keys (via / block).
+        const isVungGioiHan = meshItem.IsVungGioiHan === true;
+        const viaName   = isVungGioiHan
+            ? (meshItem.VungName || null)
+            : (meshItem.ViaName  || meshItem.VungName || null);
+        const blockName = isVungGioiHan
+            ? (meshItem.Name     || null)
+            : (meshItem.BlockName || meshItem.Name || null);
         const handle    = meshItem.Handle    || null;  // AutoCAD entity handle (hex, e.g. "2F4A")
         const layer     = meshItem.Layer     || null;  // AutoCAD layer name
 
-        // Normalise Type AND SurfaceType to derive featureType.
-        // SurfaceType ("Vách" / "Trụ") is used by Vùng giới hạn region blocks
-        // in place of embedding the surface role inside the Type string.
+        // Normalise Type to derive featureType.
+        // For IsVungGioiHan records the Type field IS the surface role ("Vách" / "Trụ").
+        // For legacy gioi_han records that used Type="Vùng giới hạn", SurfaceType
+        // carries the role — keep the fallback for backward compatibility.
         const rawType        = (meshItem.Type        || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
         const rawSurfaceType = (meshItem.SurfaceType || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
         const featureType =
