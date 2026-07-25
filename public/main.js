@@ -86,7 +86,10 @@ function initThreeJS() {
   // ----- BUILD LO BUTTON -----
   const buildLoBtn = document.getElementById('build-lo-btn');
   if (buildLoBtn) {
-    buildLoBtn.addEventListener('click', () => buildDuongLoMesh(rawDataSegments, meshGroup));
+    buildLoBtn.addEventListener('click', () => {
+      const wallH = parseFloat(document.getElementById('lo-wall-height')?.value) || 0;
+      buildDuongLoMesh(rawDataSegments, meshGroup, wallH);
+    });
   }
   // ----- SLICE BUTTON -----
   let lastSliceData = null;

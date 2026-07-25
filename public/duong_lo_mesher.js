@@ -113,7 +113,7 @@ function stripMesh(rows, color) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-export function buildDuongLoMesh(rawDataSegments, meshGroup) {
+export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
     // ── 1. Group segments by tunnel name ─────────────────────────────────────
     const tunnels = new Map(); // tunnelName → { nen, noc, bien }
     for (const seg of rawDataSegments) {
@@ -181,6 +181,8 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup) {
         if (stationYs.length < 2) continue;
 
         const archRows  = [];
+        const wallLRows = []; // left side wall
+        const wallRRows = []; // right side wall
         const floorRows = [];
 
         for (const y of stationYs) {
@@ -189,12 +191,39 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup) {
             const pBR  = interpAtY(bienR,   y);
             if (!pNoc || !pBL || !pBR) continue;
 
-            // Arc through the three surveyed points
-            archRows.push(circumArc(pBL, pNoc, pBR, ARC_SEGS));
+            // 1. Create raised points for the roof arc by adding wallHeight to Z
+            const pNoc_top = new THREE.Vector3(pNoc.x, y, pNoc.z + wallHeight);
+            const pBL_top  = new THREE.Vector3(pBL.x, y, pBL.z + wallHeight);
+            const pBR_top  = new THREE.Vector3(pBR.x, y, pBR.z + wallHeight);
 
-            // Flat floor strip
+            // Arc through the newly raised points
+            archRows.push(circumArc(pBL_top, pNoc_top, pBR_top, ARC_SEGS));
+
+            // 2. Build side walls connecting the raised points back down to the original survey points
+            if (wallHeight > 0) {
+                // Maintained winding order to ensure normals face inward toward the tunnel
+                wallLRows.push([pBL_top, pBL.clone()]); 
+                wallRRows.push([pBR.clone(), pBR_top]);
+            }
+
+            // 3. Keep the floor at the exact original surveyed elevation
             const floor = [pBL.clone()];
-            if (nenLine) { const pN = interpAtY(nenLine, y); if (pN) floor.push(pN); }
+            let foundCenter = false;
+
+            if (nenLine) {
+                const pN = interpAtY(nenLine, y);
+                if (pN) {
+                    floor.push(pN);
+                    foundCenter = true;
+                }
+            }
+
+            // Prevent stripMesh index corruption: If a tunnel has a nenLine but 
+            // interpolation fails at this specific Y, inject a midpoint to maintain column count.
+            if (nenLine && !foundCenter) {
+                floor.push(pBL.clone().lerp(pBR, 0.5));
+            }
+            
             floor.push(pBR.clone());
             floorRows.push(floor);
         }
@@ -207,6 +236,12 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup) {
             archMesh.name = `DuongLo_Arch_${tunnelName}`;
             grp.add(archMesh);
         }
+
+        // Side walls (slightly lighter blue)
+        const wallLMesh = stripMesh(wallLRows, 0x5599dd);
+        if (wallLMesh) { wallLMesh.name = `DuongLo_WallL_${tunnelName}`; grp.add(wallLMesh); }
+        const wallRMesh = stripMesh(wallRRows, 0x5599dd);
+        if (wallRMesh) { wallRMesh.name = `DuongLo_WallR_${tunnelName}`; grp.add(wallRMesh); }
 
         // Floor strip (sandy brown)
         const floorMesh = stripMesh(floorRows, 0xc89060);
