@@ -205,7 +205,9 @@ function handleNewPoints(arrayOfLineSegments) {
 
   // Store globally so the Fast Stitch / CGAL buttons can access the data
   rawDataSegments.length = 0;
-  rawDataSegments.push(...arrayOfLineSegments);
+  // Avoid spread operator here: push(...largeArray) passes every element as a
+  // call-stack argument and throws "Maximum call stack size exceeded" on big files.
+  for (const seg of arrayOfLineSegments) rawDataSegments.push(seg);
 
   // Clear out ANY old lines/points inside the group
   meshGroup.clear();

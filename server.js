@@ -10,7 +10,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // Large JSON bodies — contour sets can run into many MB.
-app.use(express.json({ limit: '128mb' }));
+app.use(express.json({ limit: '512mb' }));
 
 // Expose the 'public' directory for standard HTML/JS/CSS
 app.use(express.static(path.join(__dirname, 'public')));
