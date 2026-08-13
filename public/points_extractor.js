@@ -68,7 +68,8 @@ export async function setupFileInput(onDataLoaded) {
         const tietDienName = isLoai2 ? (meshItem.TietDienName || null) : null;
         if (isLoai2) {
             blockName    = meshItem.DuongLoName || blockName;
-            const sub    = (meshItem.SubType || '').toLowerCase();
+            // LayerType = new format; SubType = old format
+            const sub    = (meshItem.LayerType || meshItem.SubType || '').toLowerCase();
             duongLoLayer = sub === 'tietdien' ? 'tiet dien' : 'nen';
         }
         meshItem.FlattenedVertices.forEach(vertex => {
@@ -117,7 +118,7 @@ export async function setupFileInput(onDataLoaded) {
           // non-decomposable Đ/đ character.
           const isClosed         = meshItem.IsClosed === true;
           const isDutGay          = rawType.includes('ut gay');
-          const isLoai2TietDien   = isLoai2 && (meshItem.SubType || '') === 'TietDien';
+          const isLoai2TietDien   = isLoai2 && (meshItem.SubType === 'TietDien' || meshItem.LayerType === 'TietDien');
           if ((isDutGay || isLoai2TietDien) && isClosed && currentSegment.length >= 2) {
               const first = currentSegment[0];
               currentSegment.push(new THREE.Vector3(first.x, first.y, first.z));
