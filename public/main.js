@@ -218,17 +218,20 @@ function handleNewPoints(arrayOfLineSegments) {
   const centerBox = new THREE.Box3(); // To calculate total bounds
 
   arrayOfLineSegments.forEach((segmentArray, index) => {
-    
+    // TietDien vertices are in local CAD block space, not world coords — exclude from scene
+    if (segmentArray.isDuongLo && segmentArray.duongLoLayer === 'tiet dien') return;
+
     const hue = (index / arrayOfLineSegments.length) * 360; 
     let layerMaterial;
     
     if (segmentArray.isDuongLo) {
       // Mine-tunnel skeleton: colour by layer type
-      //   Nền (floor) = orange, Nóc (roof) = cyan, Biên (wall) = light grey
+      //   Nền = orange, Nóc = cyan, Biên = light grey, Tiết diện = lime
       const duongLoColor =
-          segmentArray.duongLoLayer === 'nen'  ? 0xff8800 :
-          segmentArray.duongLoLayer === 'noc'  ? 0x00ddff :
-          segmentArray.duongLoLayer === 'bien' ? 0xcccccc : 0xffffff;
+          segmentArray.duongLoLayer === 'nen'       ? 0xff8800 :
+          segmentArray.duongLoLayer === 'noc'       ? 0x00ddff :
+          segmentArray.duongLoLayer === 'bien'      ? 0xcccccc :
+          segmentArray.duongLoLayer === 'tiet dien' ? 0xaaff00 : 0xffffff;
       layerMaterial = new THREE.LineBasicMaterial({ color: duongLoColor, depthTest: false });
     } else if (segmentArray.isBoundary) {
       layerMaterial = new THREE.LineBasicMaterial({

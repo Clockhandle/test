@@ -36,7 +36,7 @@ export async function setupFileInput(onDataLoaded) {
         const viaName   = isVungGioiHan
             ? (meshItem.VungName || null)
             : (meshItem.ViaName  || meshItem.VungName || null);
-        const blockName = isVungGioiHan
+        let blockName = isVungGioiHan
             ? (meshItem.Name     || null)
             : (meshItem.BlockName || meshItem.Name || null);
         const handle    = meshItem.Handle    || null;  // AutoCAD entity handle (hex, e.g. "2F4A")
@@ -59,10 +59,18 @@ export async function setupFileInput(onDataLoaded) {
         // is U+0110 and does NOT decompose under NFD, so 'dia hinh lo' never
         // matches — use 'hinh lo' instead), or fall back to the LayerType field
         // which is only present on duong-lo records.
-        const isDuongLo    = rawType.includes('hinh lo') || !!meshItem.LayerType;
-        const duongLoLayer = isDuongLo
-            ? (meshItem.LayerType || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+        const isDuongLo = rawType.includes('hinh lo') || !!meshItem.LayerType;
+        let duongLoLayer = isDuongLo
+            ? (meshItem.LayerType || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
             : null;
+        // Loai 2: remap grouping key and layer tokens expected by the mesher.
+        const isLoai2      = rawType.includes('loai 2');
+        const tietDienName = isLoai2 ? (meshItem.TietDienName || null) : null;
+        if (isLoai2) {
+            blockName    = meshItem.DuongLoName || blockName;
+            const sub    = (meshItem.SubType || '').toLowerCase();
+            duongLoLayer = sub === 'tietdien' ? 'tiet dien' : 'nen';
+        }
         meshItem.FlattenedVertices.forEach(vertex => {
           const x = vertex[0];
           const y = vertex[1];
@@ -84,13 +92,14 @@ export async function setupFileInput(onDataLoaded) {
               currentSegment.isBoundary  = false;
               currentSegment.isBreakLine = isBreakLine;
               currentSegment.isBemat     = isBemat;
-              currentSegment.isDuongLo   = isDuongLo;
-              currentSegment.duongLoLayer = duongLoLayer;
-              currentSegment.featureType = featureType;
-              currentSegment.blockName   = blockName;
-              currentSegment.viaName     = viaName;
-              currentSegment.handle      = handle;
-              currentSegment.layer       = layer;
+              currentSegment.isDuongLo    = isDuongLo;
+              currentSegment.duongLoLayer  = duongLoLayer;
+              currentSegment.tietDienName  = tietDienName;
+              currentSegment.featureType   = featureType;
+              currentSegment.blockName     = blockName;
+              currentSegment.viaName       = viaName;
+              currentSegment.handle        = handle;
+              currentSegment.layer         = layer;
               lineSegments.push(currentSegment);
             }
             currentSegment = [];
@@ -106,23 +115,25 @@ export async function setupFileInput(onDataLoaded) {
           // a closed cylinder for polyline_split instead of an open curtain.
           // Note: 'Đứt gãy' normalises to 'đut gay'; use 'ut gay' to avoid the
           // non-decomposable Đ/đ character.
-          const isClosed  = meshItem.IsClosed === true;
-          const isDutGay  = rawType.includes('ut gay');
-          if (isDutGay && isClosed && currentSegment.length >= 2) {
+          const isClosed         = meshItem.IsClosed === true;
+          const isDutGay          = rawType.includes('ut gay');
+          const isLoai2TietDien   = isLoai2 && (meshItem.SubType || '') === 'TietDien';
+          if ((isDutGay || isLoai2TietDien) && isClosed && currentSegment.length >= 2) {
               const first = currentSegment[0];
               currentSegment.push(new THREE.Vector3(first.x, first.y, first.z));
           }
-          currentSegment.isBoundary  = isBoundary;
-          currentSegment.isHole      = isHole;
-          currentSegment.isBreakLine = isBreakLine;
-          currentSegment.isBemat     = isBemat;
-          currentSegment.isDuongLo   = isDuongLo;
-          currentSegment.duongLoLayer = duongLoLayer;
-          currentSegment.featureType = featureType;
-          currentSegment.blockName   = blockName;
-          currentSegment.viaName     = viaName;
-          currentSegment.handle      = handle;
-          currentSegment.layer       = layer;
+          currentSegment.isBoundary   = isBoundary;
+          currentSegment.isHole       = isHole;
+          currentSegment.isBreakLine  = isBreakLine;
+          currentSegment.isBemat      = isBemat;
+          currentSegment.isDuongLo    = isDuongLo;
+          currentSegment.duongLoLayer  = duongLoLayer;
+          currentSegment.tietDienName  = tietDienName;
+          currentSegment.featureType   = featureType;
+          currentSegment.blockName     = blockName;
+          currentSegment.viaName       = viaName;
+          currentSegment.handle        = handle;
+          currentSegment.layer         = layer;
           lineSegments.push(currentSegment);
         }
       });

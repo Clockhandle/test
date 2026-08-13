@@ -111,20 +111,131 @@ function stripMesh(rows, color) {
     }));
 }
 
+// ── Loai 2: sweep tiet-dien profile along nen path ──────────────────────────
+
+/**
+ * Sweeps a 2-D cross-section (tiet_dien) along the nen path.
+ * The nen polyline is the bottom-centre of the profile at every station.
+ * X and Z of the tiet_dien vertices define the local horizontal / vertical
+ * offsets from that centre; Y is ignored (it comes from the nen path).
+ */
+function buildLoai2Tunnel(nenSegs, tietDienSegs, tunnelName, grp) {
+    if (!nenSegs.length || !tietDienSegs.length) return;
+
+    // Map TietDienName → raw shape segment.
+    const tietDienMap = new Map();
+    for (const seg of tietDienSegs) { if (seg.tietDienName) tietDienMap.set(seg.tietDienName, seg); }
+    const fallbackShape = tietDienSegs[0];
+
+    // ── 1. Build arch + floor rings for every DoanDuongLo segment ─────────────
+    const segments = []; // { nenSeg, archRows, floorRows }
+
+    for (const nenSeg of nenSegs) {
+        if (nenSeg.length < 2) continue;
+        const rawShape = (nenSeg.tietDienName && tietDienMap.has(nenSeg.tietDienName))
+            ? tietDienMap.get(nenSeg.tietDienName) : fallbackShape;
+        if (!rawShape || rawShape.length < 3) continue;
+
+        // Normalise profile: shape is in XY plane (Z=0); X = horizontal, Y = vertical.
+        let localShape = rawShape.map(p => ({ x: p.x, z: p.y }));
+        const xs   = localShape.map(p => p.x);
+        const zs   = localShape.map(p => p.z);
+        const cx   = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const minZ = Math.min(...zs);
+        localShape = localShape.map(p => ({ x: p.x - cx, z: p.z - minZ }));
+        const pf = localShape[0], pl = localShape[localShape.length - 1];
+        if (Math.abs(pf.x - pl.x) > 1e-6 || Math.abs(pf.z - pl.z) > 1e-6) localShape.push({ ...pf });
+
+        // Floor / arch index split (floor = points at z≈0 after normalisation).
+        const FLOOR_EPS = 1e-3, nU = localShape.length - 1;
+        let floorStart = -1, floorEnd = -1;
+        for (let i = 0; i < nU; i++) {
+            if (localShape[i].z <= FLOOR_EPS) { if (floorStart === -1) floorStart = i; floorEnd = i; }
+        }
+        const archIdxs = [];
+        if (floorStart !== -1) {
+            let j = floorEnd;
+            for (let k = 0; k <= nU; k++) { archIdxs.push(j); if (j === floorStart) break; j = (j + 1) % nU; }
+        }
+
+        const archRows = [], floorRows = [], nPts = nenSeg.length;
+        for (let i = 0; i < nPts; i++) {
+            const pt = nenSeg[i];
+            let tangent;
+            if      (i === 0)        tangent = new THREE.Vector3().subVectors(nenSeg[1],      nenSeg[0]).normalize();
+            else if (i === nPts - 1) tangent = new THREE.Vector3().subVectors(nenSeg[nPts-1], nenSeg[nPts-2]).normalize();
+            else                     tangent = new THREE.Vector3().subVectors(nenSeg[i+1],    nenSeg[i-1]).normalize();
+
+            let right = new THREE.Vector3().crossVectors(tangent, new THREE.Vector3(0, 0, 1));
+            if (right.lengthSq() < 1e-10) right.set(1, 0, 0); else right.normalize();
+            const up = new THREE.Vector3().crossVectors(right, tangent).normalize();
+
+            const ring = localShape.map(({ x, z }) => new THREE.Vector3(
+                pt.x + right.x * x + up.x * z,
+                pt.y + right.y * x + up.y * z,
+                pt.z + right.z * x + up.z * z
+            ));
+            archRows.push(floorStart !== -1 ? archIdxs.map(idx => ring[idx]) : ring);
+            if (floorStart !== -1 && floorEnd > floorStart) floorRows.push(ring.slice(floorStart, floorEnd + 1));
+        }
+        segments.push({ nenSeg, archRows, floorRows });
+    }
+
+    // ── 2. Weld junctions: if two same-profile segments share a 3-D point,
+    //       copy the neighbour's station ring onto the endpoint so meshes align. ──
+    const WELD_TOL = 0.1; // metres
+    for (let si = 0; si < segments.length; si++) {
+        const { nenSeg: segA, archRows: archA, floorRows: floorA } = segments[si];
+        for (const isEnd of [false, true]) {
+            const ptA = segA[isEnd ? segA.length - 1 : 0];
+            for (let sj = 0; sj < segments.length; sj++) {
+                if (si === sj || segA.tietDienName !== segments[sj].nenSeg.tietDienName) continue;
+                const { nenSeg: segB, archRows: archB, floorRows: floorB } = segments[sj];
+                for (let k = 0; k < segB.length; k++) {
+                    if (ptA.distanceTo(segB[k]) > WELD_TOL) continue;
+                    // Only weld at segB's own endpoints; a T-junction (middle station) would
+                    // force a foreign orientation onto segA's tip ring and collapse the tube.
+                    if (k !== 0 && k !== segB.length - 1) continue;
+                    const ar = isEnd ? archA.length - 1 : 0;
+                    const fr = isEnd ? floorA.length - 1 : 0;
+                    if (k < archB.length)  archA[ar] = archB[k].map(v => v.clone());
+                    if (k < floorB.length && fr < floorA.length) floorA[fr] = floorB[k].map(v => v.clone());
+                }
+            }
+        }
+    }
+
+    // ── 3. Build meshes ────────────────────────────────────────────────────────
+    for (let si = 0; si < segments.length; si++) {
+        const { archRows, floorRows } = segments[si];
+        if (archRows.length >= 2) {
+            const segColor = new THREE.Color().setHSL(si / Math.max(segments.length, 1), 0.65, 0.55);
+            const m = stripMesh(archRows, segColor.getHex());
+            if (m) { m.name = `DuongLo_L2_Arch_${tunnelName}_${si}`; grp.add(m); }
+        }
+        if (floorRows.length >= 2) {
+            const m = stripMesh(floorRows, 0xff8800);
+            if (m) { m.name = `DuongLo_L2_Floor_${tunnelName}_${si}`; grp.add(m); }
+        }
+    }
+    console.log(`[DuongLo Loai2] "${tunnelName}": ${segments.length} segments built`);
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
     // ── 1. Group segments by tunnel name ─────────────────────────────────────
-    const tunnels = new Map(); // tunnelName → { nen, noc, bien }
+    const tunnels = new Map(); // tunnelName → { nen, noc, bien, tietDien }
     for (const seg of rawDataSegments) {
         if (!seg.isDuongLo) continue;
         const name = seg.blockName || '__default__';
-        if (!tunnels.has(name)) tunnels.set(name, { nen: [], noc: [], bien: [] });
+        if (!tunnels.has(name)) tunnels.set(name, { nen: [], noc: [], bien: [], tietDien: [] });
         const t     = tunnels.get(name);
         const layer = seg.duongLoLayer || '';
-        if      (layer === 'nen')  t.nen.push(seg);
-        else if (layer === 'noc')  t.noc.push(seg);
-        else if (layer === 'bien') t.bien.push(seg);
+        if      (layer === 'nen')       t.nen.push(seg);
+        else if (layer === 'noc')       t.noc.push(seg);
+        else if (layer === 'bien')      t.bien.push(seg);
+        else if (layer === 'tiet dien') t.tietDien.push(seg);
     }
 
     // ── 2. Replace old mesh group ─────────────────────────────────────────────
@@ -143,7 +254,18 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
     const ARC_SEGS = 14; // arc subdivisions per cross-section
 
     // ── 3. Build each tunnel ──────────────────────────────────────────────────
-    for (const [tunnelName, { nen, noc, bien }] of tunnels) {
+    for (const [tunnelName, { nen, noc, bien, tietDien }] of tunnels) {
+        // Loai 2: nen path + tiet_dien cross-section profile.
+        if (tietDien.length > 0) {
+            if (!nen.length) {
+                console.warn(`[DuongLo Loai2] "${tunnelName}" — missing Nền path, skipping.`);
+                continue;
+            }
+            buildLoai2Tunnel(nen, tietDien, tunnelName, grp);
+            continue;
+        }
+
+        // Loai 1 (original): nen + noc + bien survey lines.
         if (!noc.length || bien.length < 2) {
             console.warn(`[DuongLo] "${tunnelName}" — missing Nóc or Biên, skipping.`);
             continue;
