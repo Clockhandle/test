@@ -21,6 +21,24 @@ app.use(
   express.static(path.join(__dirname, 'node_modules', 'three'))
 );
 
+// Expose three-mesh-bvh (Required peer dependency)
+app.use(
+  '/node_modules/three-mesh-bvh',
+  express.static(path.join(__dirname, 'node_modules', 'three-mesh-bvh'))
+);
+
+// Expose three-bvh-csg
+app.use(
+  '/node_modules/three-bvh-csg',
+  express.static(path.join(__dirname, 'node_modules', 'three-bvh-csg'))
+);
+
+// Expose 'node_modules/three' so the browser can import it
+app.use(
+  '/node_modules/three',
+  express.static(path.join(__dirname, 'node_modules', 'three'))
+);
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
