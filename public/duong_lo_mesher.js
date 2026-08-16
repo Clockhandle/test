@@ -62,6 +62,13 @@ function circumArc(P1, P2, P3, nSegs = 16) {
     });
 }
 
+// Clones each point in a line/segment array and subtracts the shared global
+// offset, WITHOUT mutating the originals — those same array references are
+// also used elsewhere (e.g. main.js) to render the raw colored contour lines.
+function offsetLine(segArr, globalOffset) {
+    return segArr.map(p => p.clone().sub(globalOffset));
+}
+
 // ── Multi-Material Floor Splitter (Safe for Non-Indexed Geometries) ───────────
 
 function splitFloorMaterial(geom) {
@@ -236,7 +243,7 @@ function generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight, ARC_S
 
 // ── Loai 2: Extrusion Generators ────────────────────────────────────────────
 
-function generateLoai2Geometries(nenSegs, tietDienSegs, materials) {
+function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset) {
     const brushes = [];
     if (!nenSegs.length || !tietDienSegs.length) return brushes;
 
@@ -275,7 +282,7 @@ function generateLoai2Geometries(nenSegs, tietDienSegs, materials) {
         const profile = shapeMap.get(nenSeg.tietDienName) || fallbackShape;
         if (!profile) continue;
 
-        const pts = nenSeg.map(p => new THREE.Vector3(p.x, p.y, p.z));
+        const pts = nenSeg.map(p => new THREE.Vector3(p.x, p.y, p.z).sub(globalOffset));
         const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0);
 
         curve.computeFrenetFrames = function(steps) {
@@ -321,6 +328,14 @@ function generateLoai2Geometries(nenSegs, tietDienSegs, materials) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
+    let globalOffset = null;
+    for (const seg of rawDataSegments) {
+        if (!seg.isDuongLo) continue;
+        if (!globalOffset && seg.length) globalOffset = seg[0].clone();
+    }
+    // Defensive fallback — avoids a crash if no isDuongLo segments were found
+    if (!globalOffset) globalOffset = new THREE.Vector3(0, 0, 0);
+
     const tunnels = new Map(); 
     for (const seg of rawDataSegments) {
         if (!seg.isDuongLo) continue;
@@ -376,7 +391,7 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
                 console.warn(`[DuongLo Loai2] "${tunnelName}" — missing Nền path.`);
                 continue;
             }
-            const brushes = generateLoai2Geometries(nen, tietDien, materials);
+            const brushes = generateLoai2Geometries(nen, tietDien, materials, globalOffset);
             allBrushes.push(...brushes);
             
         } else if (noc.length > 0 && bien.length >= 2) {
@@ -385,10 +400,10 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
                 const bx = B.reduce((s, p) => s + p.x, 0) / B.length;
                 return ax - bx;
             });
-            const nocLine = noc[0];
-            const bienL = sorted[0];
-            const bienR = sorted[sorted.length - 1];
-            const nenLine = nen.length > 0 ? nen[0] : null;
+            const nocLine = offsetLine(noc[0], globalOffset);
+            const bienL   = offsetLine(sorted[0], globalOffset);
+            const bienR   = offsetLine(sorted[sorted.length - 1], globalOffset);
+            const nenLine = nen.length > 0 ? offsetLine(nen[0], globalOffset) : null;
 
             const geom = generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight);
             if (geom) {
@@ -418,6 +433,8 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
     combinedMesh.name = 'DuongLo_Unified_CSG_Mesh';
     combinedMesh.castShadow = true;
     combinedMesh.receiveShadow = true;
+    combinedMesh.position.copy(globalOffset);
+    combinedMesh.updateMatrixWorld(true);
     grp.add(combinedMesh);
 
     console.log(`[DuongLo CSG] Successfully united tunnel network.`);
