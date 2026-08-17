@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { Evaluator, Brush, ADDITION } from 'three-bvh-csg';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -62,17 +63,46 @@ function circumArc(P1, P2, P3, nSegs = 16) {
     });
 }
 
-// Clones each point in a line/segment array and subtracts the shared global
-// offset, WITHOUT mutating the originals — those same array references are
-// also used elsewhere (e.g. main.js) to render the raw colored contour lines.
 function offsetLine(segArr, globalOffset) {
     return segArr.map(p => p.clone().sub(globalOffset));
 }
 
-// ── Multi-Material Floor Splitter (Safe for Non-Indexed Geometries) ───────────
+// ── Spatial Junction Detection ────────────────────────────────────────────────
 
-function splitFloorMaterial(geom) {
-    // If ExtrudeGeometry didn't create an index, convert it to an indexed geometry first
+function distToSegmentSq(p, v, w) {
+    let l2 = v.distanceToSquared(w);
+    if (l2 === 0) return p.distanceToSquared(v);
+    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y) + (p.z - v.z) * (w.z - v.z)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    let projX = v.x + t * (w.x - v.x);
+    let projY = v.y + t * (w.y - v.y);
+    let projZ = v.z + t * (w.z - v.z);
+    let dx = p.x - projX, dy = p.y - projY, dz = p.z - projZ;
+    return dx*dx + dy*dy + dz*dz;
+}
+
+/**
+ * Checks if a given endpoint touches any other segment in the entire mine network.
+ * If it touches > 1 path, it's a junction. If it only touches 1 (itself), it's floating.
+ */
+function isFloating(pt, allSkeletonPaths) {
+    const TOL_SQ = 0.05 * 0.05; // 5cm connection tolerance
+    let matchCount = 0;
+    
+    for (const path of allSkeletonPaths) {
+        for (let i = 0; i < path.length - 1; i++) {
+            if (distToSegmentSq(pt, path[i], path[i+1]) < TOL_SQ) {
+                matchCount++;
+                break; // Only count each path once
+            }
+        }
+    }
+    return matchCount <= 1; 
+}
+
+// ── Multi-Material Splitter (Dynamic Caps & Floors) ───────────────────────────
+
+function splitMaterials(geom, isStartFloating, isEndFloating, startPt, endPt) {
     if (!geom.index) {
         const pos = geom.attributes.position;
         const count = pos.count;
@@ -88,25 +118,35 @@ function splitFloorMaterial(geom) {
     const newIndices = [];
     const newGroups = [];
     
+    const cap0Indices = [];  // Floating caps (Invisible)
+    const cap1Indices = [];  // Junction caps (Solid wall)
+    const wallIndices = [];  // Sides
+    const floorIndices = []; // Floor
+    
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
     const ab = new THREE.Vector3(), ac = new THREE.Vector3(), faceNormal = new THREE.Vector3();
     
     for (const g of oldGroups) {
-        if (g.materialIndex === 0) {
-            const start = newIndices.length;
-            for (let i = g.start; i < g.start + g.count; i++) {
-                newIndices.push(oldIdx[i]);
-            }
-            newGroups.push({ start: start, count: g.count, materialIndex: 0 });
-        } else {
-            const wallIndices = [];
-            const floorIndices = [];
-            
+        if (g.materialIndex === 0) { // Caps
             for (let i = g.start; i < g.start + g.count; i += 3) {
-                const a = oldIdx[i];
-                const b = oldIdx[i+1];
-                const c = oldIdx[i+2];
+                const a = oldIdx[i], b = oldIdx[i+1], c = oldIdx[i+2];
+                vA.fromBufferAttribute(pos, a);
+                vB.fromBufferAttribute(pos, b);
+                vC.fromBufferAttribute(pos, c);
                 
+                // Determine if this cap triangle is at the start or end of the tunnel
+                const centroid = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
+                const distStart = centroid.distanceToSquared(startPt);
+                const distEnd = centroid.distanceToSquared(endPt);
+                
+                const floating = distStart < distEnd ? isStartFloating : isEndFloating;
+                
+                if (floating) cap0Indices.push(a, b, c);
+                else cap1Indices.push(a, b, c);
+            }
+        } else { // Sides
+            for (let i = g.start; i < g.start + g.count; i += 3) {
+                const a = oldIdx[i], b = oldIdx[i+1], c = oldIdx[i+2];
                 vA.fromBufferAttribute(pos, a);
                 vB.fromBufferAttribute(pos, b);
                 vC.fromBufferAttribute(pos, c);
@@ -115,25 +155,29 @@ function splitFloorMaterial(geom) {
                 ac.subVectors(vC, vA);
                 faceNormal.crossVectors(ab, ac).normalize();
                 
-                // Downward facing triangles (-Z axis) are classified as the floor
-                if (faceNormal.z < -0.5) {
-                    floorIndices.push(a, b, c);
-                } else {
-                    wallIndices.push(a, b, c);
-                }
-            }
-            
-            if (wallIndices.length > 0) {
-                const start = newIndices.length;
-                newIndices.push(...wallIndices);
-                newGroups.push({ start: start, count: wallIndices.length, materialIndex: 1 });
-            }
-            if (floorIndices.length > 0) {
-                const start = newIndices.length;
-                newIndices.push(...floorIndices);
-                newGroups.push({ start: start, count: floorIndices.length, materialIndex: 2 });
+                if (faceNormal.z < -0.5) floorIndices.push(a, b, c);
+                else wallIndices.push(a, b, c);
             }
         }
+    }
+    
+    // Group 0: Invisible Caps
+    if (cap0Indices.length > 0) {
+        const start = newIndices.length;
+        newIndices.push(...cap0Indices);
+        newGroups.push({ start, count: cap0Indices.length, materialIndex: 0 });
+    }
+    // Group 1: Solid Walls + Junction Caps
+    if (wallIndices.length > 0 || cap1Indices.length > 0) {
+        const start = newIndices.length;
+        newIndices.push(...wallIndices, ...cap1Indices);
+        newGroups.push({ start, count: wallIndices.length + cap1Indices.length, materialIndex: 1 });
+    }
+    // Group 2: Floor
+    if (floorIndices.length > 0) {
+        const start = newIndices.length;
+        newIndices.push(...floorIndices);
+        newGroups.push({ start, count: floorIndices.length, materialIndex: 2 });
     }
     
     geom.setIndex(newIndices);
@@ -196,7 +240,7 @@ function createClosedSolidGeometry(rings) {
     return geom;
 }
 
-function generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight, ARC_SEGS = 14) {
+function generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight, allPaths, materials, ARC_SEGS = 14) {
     const yLo = Math.max(
         Math.min(...nocLine.map(p => p.y)),
         Math.min(...bienL.map(p => p.y)),
@@ -238,12 +282,27 @@ function generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight, ARC_S
         rings.push(ring);
     }
 
-    return createClosedSolidGeometry(rings);
+    let geom = createClosedSolidGeometry(rings);
+    if (!geom) return null;
+    geom = mergeVertices(geom);
+    geom.computeVertexNormals();
+
+    const startPt = interpAtY(nocLine, stationYs[0]);
+    const endPt = interpAtY(nocLine, stationYs[stationYs.length - 1]);
+    
+    const isStartF = isFloating(startPt, allPaths);
+    const isEndF = isFloating(endPt, allPaths);
+    
+    splitMaterials(geom, isStartF, isEndF, startPt, endPt);
+    
+    const brush = new Brush(geom, materials);
+    brush.updateMatrixWorld();
+    return brush;
 }
 
 // ── Loai 2: Extrusion Generators ────────────────────────────────────────────
 
-function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset) {
+function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset, allPaths) {
     const brushes = [];
     if (!nenSegs.length || !tietDienSegs.length) return brushes;
 
@@ -295,11 +354,8 @@ function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset)
                 let b = up.clone();
                 let n = new THREE.Vector3().crossVectors(b, t);
                 
-                if (n.lengthSq() < 1e-10) {
-                    n.set(1, 0, 0); 
-                } else {
-                    n.normalize();
-                }
+                if (n.lengthSq() < 1e-10) n.set(1, 0, 0); 
+                else n.normalize();
 
                 b.crossVectors(t, n).normalize();
                 normals.push(n);
@@ -308,14 +364,23 @@ function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset)
             return { tangents, normals, binormals };
         };
 
-        const geom = new THREE.ExtrudeGeometry(profile, {
+        let geom = new THREE.ExtrudeGeometry(profile, {
             steps: pts.length * 4,
             bevelEnabled: false,
             extrudePath: curve
         });
 
-        // Split the floor out to Material Index 2
-        splitFloorMaterial(geom);
+        geom = mergeVertices(geom);
+        geom.computeVertexNormals();
+
+        const startPt = pts[0];
+        const endPt = pts[pts.length - 1];
+        
+        // Dynamically assign open/close state based on intersection
+        const isStartF = isFloating(startPt, allPaths);
+        const isEndF = isFloating(endPt, allPaths);
+        
+        splitMaterials(geom, isStartF, isEndF, startPt, endPt);
 
         const brush = new Brush(geom, materials);
         brush.updateMatrixWorld();
@@ -333,7 +398,6 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
         if (!seg.isDuongLo) continue;
         if (!globalOffset && seg.length) globalOffset = seg[0].clone();
     }
-    // Defensive fallback — avoids a crash if no isDuongLo segments were found
     if (!globalOffset) globalOffset = new THREE.Vector3(0, 0, 0);
 
     const tunnels = new Map(); 
@@ -348,6 +412,19 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
         else if (layer === 'noc')       t.noc.push(seg);
         else if (layer === 'bien')      t.bien.push(seg);
         else if (layer === 'tiet dien') t.tietDien.push(seg);
+    }
+    
+    // ── Pre-calculate Network Skeletons ──
+    const allSkeletonPaths = [];
+    for (const [tunnelName, { nen, noc, bien, tietDien }] of tunnels) {
+        if (tietDien.length > 0) {
+            for (const nenSeg of nen) {
+                if (nenSeg.length < 2) continue;
+                allSkeletonPaths.push(nenSeg.map(p => new THREE.Vector3(p.x, p.y, p.z).sub(globalOffset)));
+            }
+        } else if (noc.length > 0 && bien.length >= 2) {
+            allSkeletonPaths.push(offsetLine(noc[0], globalOffset));
+        }
     }
 
     const old = meshGroup.getObjectByName('DuongLo_Meshes');
@@ -367,31 +444,16 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
 
     // ── The 3 Material Slots ──
     const capMaterial = new THREE.MeshBasicMaterial({ visible: false });
-    
-    // Index 1: Blue Arch and Walls
-    const wallMaterial = new THREE.MeshBasicMaterial({
-        color: 0x4488cc,
-        side: THREE.DoubleSide
-    });
-    
-    // Index 2: Orange Floor
-    const floorMaterial = new THREE.MeshBasicMaterial({
-        color: 0xc89060,
-        side: THREE.DoubleSide
-    });
-    
+    const wallMaterial = new THREE.MeshBasicMaterial({ color: 0x4488cc, side: THREE.DoubleSide });
+    const floorMaterial = new THREE.MeshBasicMaterial({ color: 0xc89060, side: THREE.DoubleSide });
     const materials = [capMaterial, wallMaterial, floorMaterial];
 
     const allBrushes = [];
 
     for (const [tunnelName, { nen, noc, bien, tietDien }] of tunnels) {
-        
         if (tietDien.length > 0) {
-            if (!nen.length) {
-                console.warn(`[DuongLo Loai2] "${tunnelName}" — missing Nền path.`);
-                continue;
-            }
-            const brushes = generateLoai2Geometries(nen, tietDien, materials, globalOffset);
+            if (!nen.length) continue;
+            const brushes = generateLoai2Geometries(nen, tietDien, materials, globalOffset, allSkeletonPaths);
             allBrushes.push(...brushes);
             
         } else if (noc.length > 0 && bien.length >= 2) {
@@ -405,15 +467,8 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
             const bienR   = offsetLine(sorted[sorted.length - 1], globalOffset);
             const nenLine = nen.length > 0 ? offsetLine(nen[0], globalOffset) : null;
 
-            const geom = generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight);
-            if (geom) {
-                // Split the floor out to Material Index 2
-                splitFloorMaterial(geom);
-                
-                const brush = new Brush(geom, materials);
-                brush.updateMatrixWorld();
-                allBrushes.push(brush);
-            }
+            const brush = generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight, allSkeletonPaths, materials);
+            if (brush) allBrushes.push(brush);
         }
     }
 
