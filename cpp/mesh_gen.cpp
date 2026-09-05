@@ -33,6 +33,13 @@
 //   --mode=clip_mesh  skip CDT; clip a raw vertex+triangle mesh (NUMVERTS/NUMTRIS tokens).
 //   --mode=slice     CDT then CGAL::Polygon_mesh_slicer sweep.
 //                    Emits polyline JSON (not a mesh). Requires SLICEAXIS + SLICESTEP.
+//   --weld-tol=<v>   endpoint-weld tolerance in drawing units (default 1e-4 = 0.1mm;
+//                    0 disables). Before CDT insertion, snaps each incoming vertex's
+//                    XY onto any already-inserted vertex within this radius, so
+//                    near-coincident endpoints from different source polylines
+//                    (float drift from JOIN/OFFSET/DXF round-trips, invisible in CAD)
+//                    collapse onto one exact CDT vertex instead of producing a sliver
+//                    triangle at that junction. See mesh_boundary()'s weld_snap.
 //   SLICEAXIS <nx> <ny> <nz>  slice-plane normal (e.g. 0 0 1 = horizontal).
 //   SLICESTEP <d>             spacing between consecutive slice planes.
 
@@ -114,7 +121,8 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
                               const std::vector<const Polyline*>&      holes,
                               const std::vector<const Polyline*>&      breaklines,
                               const std::vector<std::array<double,3>>& scatter,
-                              double                                   slope_threshold)
+                              double                                   slope_threshold,
+                              double                                   weld_tolerance)
 {
     MeshOut out;
     out.num_contours = static_cast<int>(contours.size());
@@ -124,11 +132,49 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
 
     CDT cdt;
 
+    // --- endpoint weld grid ---
+    // CDT::insert() only reuses an existing vertex when the incoming (x,y) compares
+    // EXACTLY equal as doubles. Two endpoints from different source polylines that
+    // AutoCAD's (looser) grip tolerance treats as "the same point" — but that differ
+    // in the low mantissa bits from JOIN/OFFSET/block-transform/DXF round-trips —
+    // insert as two distinct vertices here, producing a sliver/misconnected triangle
+    // right at that junction. Snap incoming XY onto any already-inserted point within
+    // weld_tolerance before calling cdt.insert() so such near-misses collapse onto one
+    // exact vertex. Cell size == weld_tolerance, so a match can only be in the 3x3
+    // neighborhood of the incoming point's cell.
+    struct WeldKey {
+        long long cx, cy;
+        bool operator==(const WeldKey& o) const noexcept { return cx == o.cx && cy == o.cy; }
+    };
+    struct WeldKeyHash {
+        std::size_t operator()(const WeldKey& k) const noexcept {
+            return std::hash<long long>()(k.cx) ^ (std::hash<long long>()(k.cy) * 2654435761u);
+        }
+    };
+    std::unordered_map<WeldKey, std::vector<std::pair<double,double>>, WeldKeyHash> weld_grid;
+    auto weld_snap = [&](double x, double y) -> std::pair<double,double> {
+        if (weld_tolerance <= 0.0) return { x, y };
+        long long cx = static_cast<long long>(std::floor(x / weld_tolerance));
+        long long cy = static_cast<long long>(std::floor(y / weld_tolerance));
+        for (long long dx = -1; dx <= 1; ++dx)
+            for (long long dy = -1; dy <= 1; ++dy) {
+                auto it = weld_grid.find({ cx + dx, cy + dy });
+                if (it == weld_grid.end()) continue;
+                for (const auto& p : it->second) {
+                    double ddx = x - p.first, ddy = y - p.second;
+                    if (ddx*ddx + ddy*ddy <= weld_tolerance*weld_tolerance) return p;
+                }
+            }
+        weld_grid[{ cx, cy }].push_back({ x, y });
+        return { x, y };
+    };
+
     // Insert a vertex and set its Z info.  If CGAL returns an existing
-    // vertex (identical XY), we overwrite Z with the last writer's value
-    // — that's fine for our purposes.
+    // vertex (identical XY, post-weld-snap), we overwrite Z with the last
+    // writer's value — that's fine for our purposes.
     auto ins = [&](double x, double y, double z) -> VH {
-        VH vh = cdt.insert(Point(x, y));
+        auto snapped = weld_snap(x, y);
+        VH vh = cdt.insert(Point(snapped.first, snapped.second));
         vh->info() = z;
         return vh;
     };
@@ -322,12 +368,15 @@ int main(int argc, char** argv)
 {
     std::ios::sync_with_stdio(false);
 
-    // Parse --mode=<value> from command-line arguments.
+    // Parse --mode=<value> and --weld-tol=<value> from command-line arguments.
     std::string mode = "mesh";
+    double weld_tolerance = 1e-4; // 0.1mm in drawing units; 0 disables snapping
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg.rfind("--mode=", 0) == 0)
             mode = arg.substr(7);
+        else if (arg.rfind("--weld-tol=", 0) == 0)
+            weld_tolerance = std::stod(arg.substr(11));
     }
 
     std::vector<Polyline>               contours;
@@ -563,7 +612,7 @@ int main(int argc, char** argv)
         std::vector<std::array<double, 3>> scpts;
         scpts.reserve(per_boundary_sc[b].size());
         for (int sci : per_boundary_sc[b]) scpts.push_back(scatter[sci]);
-        meshes.push_back(mesh_boundary(boundaries[b], ptrs, hptrs, blptrs, scpts, slope_threshold));
+        meshes.push_back(mesh_boundary(boundaries[b], ptrs, hptrs, blptrs, scpts, slope_threshold, weld_tolerance));
         std::cerr << "[mesh_gen] boundary " << b << ": "
                   << ptrs.size() << " contours, "
                   << hptrs.size() << " holes, "
