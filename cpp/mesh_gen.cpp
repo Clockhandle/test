@@ -76,6 +76,11 @@ using CDT = CGAL::Constrained_Delaunay_triangulation_2<K, Tds,
 using Point = CDT::Point;
 using VH    = CDT::Vertex_handle;
 
+// JSON output digits. 17 round-trips a double exactly; the previous 10 rounded
+// survey-scale coordinates (e.g. 2322863.279) to the millimetre, so vertices shared
+// with geometry built outside mesh_gen (z-stitch patches) no longer matched.
+constexpr int kJsonDigits = std::numeric_limits<double>::max_digits10;
+
 using Polyline = std::vector<std::array<double, 3>>;
 using SMesh    = CGAL::Surface_mesh<K::Point_3>;
 namespace PMP  = CGAL::Polygon_mesh_processing;
@@ -172,10 +177,14 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
     // Insert a vertex and set its Z info.  If CGAL returns an existing
     // vertex (identical XY, post-weld-snap), we overwrite Z with the last
     // writer's value — that's fine for our purposes.
+    // has_z records every vertex we gave a Z; any other vertex was created by
+    // CGAL itself (where two constraints cross) and gets its Z interpolated below.
+    std::unordered_set<VH, VHHash> has_z;
     auto ins = [&](double x, double y, double z) -> VH {
         auto snapped = weld_snap(x, y);
         VH vh = cdt.insert(Point(snapped.first, snapped.second));
         vh->info() = z;
+        has_z.insert(vh);
         return vh;
     };
 
@@ -253,6 +262,38 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
     // --- scatter free vertices (no constraint edges) ---
     for (const auto& pt : scatter)
         ins(pt[0], pt[1], pt[2]);
+
+    // --- Z for vertices CGAL created at constraint crossings ---
+    // With Exact_predicates_tag, crossing constraints are split at a new vertex
+    // whose info() we never set (it read back as Z = 0, and the slope filter then
+    // deleted every triangle around it). Give each such vertex the inverse-distance
+    // weighted Z of its neighbours that already have one; repeat so chains of
+    // crossings resolve from the outside in.
+    {
+        std::vector<VH> missing;
+        for (auto vit = cdt.finite_vertices_begin(); vit != cdt.finite_vertices_end(); ++vit)
+            if (!has_z.count(vit)) missing.push_back(vit);
+        if (!missing.empty())
+            std::cerr << "[mesh_gen] " << missing.size()
+                      << " constraint-crossing vertex(es) created by CDT; interpolating Z\n";
+        while (!missing.empty()) {
+            std::vector<VH> still;
+            for (VH vh : missing) {
+                double wsum = 0.0, zsum = 0.0;
+                auto vc = cdt.incident_vertices(vh), done = vc;
+                if (vc != nullptr) do {
+                    if (cdt.is_infinite(vc) || !has_z.count(vc)) continue;
+                    const double d = std::sqrt(CGAL::squared_distance(vh->point(), vc->point()));
+                    const double w = 1.0 / std::max(d, 1e-9);
+                    wsum += w; zsum += w * vc->info();
+                } while (++vc != done);
+                if (wsum > 0.0) { vh->info() = zsum / wsum; has_z.insert(vh); }
+                else still.push_back(vh);
+            }
+            if (still.size() == missing.size()) break; // isolated — nothing to learn from
+            missing.swap(still);
+        }
+    }
 
     // Build vertex-handle -> output-index map on demand.
     std::unordered_map<VH, int, VHHash> vidx;
@@ -489,7 +530,7 @@ int main(int argc, char** argv)
         std::cerr << "[mesh_gen] clip_mesh: " << base.triangles.size() << " tris after clip\n";
 
         std::ostringstream jout;
-        jout.precision(10);
+        jout.precision(kJsonDigits);
         jout << "{\"ok\":true,\"action_mode\":\"clip_mesh\""
              << ",\"num_meshes\":1"
              << ",\"num_contours\":0,\"num_boundaries\":0"
@@ -797,7 +838,7 @@ int main(int argc, char** argv)
 
         // Emit JSON.
         std::ostringstream jout;
-        jout.precision(10);
+        jout.precision(kJsonDigits);
         jout << "{\"ok\":true,\"action_mode\":\"polyline_split\""
              << ",\"num_meshes\":" << split_meshes.size()
              << ",\"num_contours\":0,\"num_boundaries\":0"
@@ -966,7 +1007,7 @@ int main(int argc, char** argv)
 
     // Emit JSON.
     std::ostringstream out;
-    out.precision(10);
+    out.precision(kJsonDigits);
     out << "{\"ok\":true"
         << ",\"action_mode\":\"" << mode << "\""
         << ",\"num_contours\":"        << contours.size()

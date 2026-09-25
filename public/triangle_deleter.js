@@ -69,6 +69,11 @@ function deleteFace(mesh, faceIndex) {
 
   geom.setIndex(new THREE.BufferAttribute(next, 1));
   geom.index.needsUpdate = true;
+  // Keep material groups (hybrid meshes colour their stitch triangles) aligned with the index.
+  for (const g of geom.groups) {
+    if (start >= g.start && start < g.start + g.count) g.count -= 3;
+    else if (g.start > start) g.start -= 3;
+  }
   // Recompute normals/bounds so lighting/raycasting stay correct.
   geom.computeVertexNormals();
   geom.computeBoundingSphere();

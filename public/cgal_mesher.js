@@ -3,6 +3,7 @@
 // boundary (every triangle lies strictly inside its boundary polygon).
 
 import * as THREE from 'three';
+import { hybridMeshGroup } from './hybrid_mesher.js';
 
 let cgalGroup = null;
 
@@ -10,6 +11,8 @@ let cgalGroup = null;
  * @param {THREE.Group} meshGroup
  * @param {Object} [opts]
  * @param {number} [opts.slope]  Max (delta_z / XY_edge) kept. Default 5.0; 0 = no filter.
+ * @param {boolean} [opts.hybrid] Z-stitch stitch regions and crossing contours, CGAL the rest
+ *                                (see hybrid_mesher.js). Groups that need neither use plain CGAL.
  */
 export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     if (!rawDataSegments || rawDataSegments.length === 0) {
@@ -28,11 +31,12 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         const blk  = seg.blockName   || '__default__';
         const key  = `${via}||${blk}||${ft}`;
         if (!groups.has(key)) {
-            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [], breaklines: [], scatter: [] });
+            groups.set(key, { viaName: seg.viaName || null, featureType: seg.featureType || null, blockName: seg.blockName || null, polylines: [], boundaries: [], holes: [], breaklines: [], scatter: [], stitchRegions: [] });
         }
         const g = groups.get(key);
         const poly = seg.map(v => [v.x, v.y, v.z]);
-        if (seg.isBoundary)       g.boundaries.push(poly);
+        if (seg.isStitchRegion)   g.stitchRegions.push({ poly, zMin: seg.stitchZMin, zMax: seg.stitchZMax });
+        else if (seg.isBoundary)  g.boundaries.push(poly);
         else if (seg.isHole)      g.holes.push(poly);
         else if (seg.isBreakLine) g.breaklines.push(poly);
         else if (seg.isBemat) {
@@ -168,14 +172,13 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
             if (typeof opts.slope === 'number' && opts.slope >= 0) payload.slope = opts.slope;
             payload.action = groupAction;
             if (Array.isArray(opts.clip_plane))                     payload.clip_plane = opts.clip_plane;
-            const resp = await fetch('/api/mesh', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-            const data = await resp.json();
-            if (!resp.ok || !data.ok) throw new Error(data.error || resp.statusText);
-            return { data, viaName: g.viaName, featureType: g.featureType, blockName: g.blockName };
+            const tag = { viaName: g.viaName, featureType: g.featureType, blockName: g.blockName };
+
+            if (opts.hybrid && groupAction === 'mesh') {
+                const hybrid = await hybridMeshGroup(g, requestMesh, { slope: payload.slope });
+                if (hybrid) return { data: hybrid, ...tag };
+            }
+            return { data: await requestMesh(payload), ...tag };
         }));
     } catch (e) {
         console.error('CGAL mesh request failed:', e);
@@ -223,12 +226,24 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     //clampTruToVach(cgalGroup);
 }
 
+// POST one mesh_gen request; resolves to its JSON, throws on failure.
+async function requestMesh(payload) {
+    const resp = await fetch('/api/mesh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || resp.statusText);
+    return data;
+}
+
 // results: Array<{ data, featureType }}
 function renderMeshes(results, meshGroup) {
     if (cgalGroup) {
         cgalGroup.traverse(o => {
             if (o.geometry) o.geometry.dispose();
-            if (o.material) o.material.dispose();
+            if (o.material) [].concat(o.material).forEach(m => m.dispose());
         });
         if (cgalGroup.parent) cgalGroup.parent.remove(cgalGroup);
     }
@@ -272,8 +287,19 @@ function renderMeshes(results, meshGroup) {
                 roughness: 0.9,
                 metalness: 0.0,
             });
-            const mesh = new THREE.Mesh(geom, mat);
+            // Hybrid results list their z-stitched triangles first; draw those in amber.
+            const nStitch = m.stitch_triangle_count || 0;
+            let material = mat;
+            if (nStitch > 0) {
+                geom.addGroup(0, nStitch * 3, 1);
+                geom.addGroup(nStitch * 3, (m.triangles.length - nStitch) * 3, 0);
+                material = [mat, new THREE.MeshStandardMaterial({
+                    color: 0xe9a43f, side: THREE.DoubleSide, flatShading: true, roughness: 0.9, metalness: 0.0,
+                })];
+            }
+            const mesh = new THREE.Mesh(geom, material);
             mesh.name = `CGAL_Mesh_${globalIndex}`;
+            if (data.hybrid) mesh.userData.hybrid = data.hybrid.stats;
             mesh.userData.clusterIndex = globalIndex;
             mesh.userData.alphaUsed    = m.alpha_used;
             mesh.userData.rawVertices  = m.vertices;   // needed for border extraction
@@ -292,6 +318,17 @@ function renderMeshes(results, meshGroup) {
 
             globalIndex++;
         });
+
+        // Hybrid seams (where z-stitch meets CGAL) in red, drawn on top.
+        for (const seam of data.hybrid?.seams || []) {
+            const geom = new THREE.BufferGeometry().setFromPoints(seam.points.map(p => new THREE.Vector3(p[0], p[1], p[2])));
+            const mat = new THREE.LineBasicMaterial({ color: 0xff4d2e, depthTest: false });
+            const line = seam.closed ? new THREE.LineLoop(geom, mat) : new THREE.Line(geom, mat);
+            line.name = `Hybrid_Seam_${featureType}`;
+            line.renderOrder = 10;
+            if (featureType) line.userData.featureType = featureType;
+            cgalGroup.add(line);
+        }
     }
 
     ensureLights(meshGroup);
@@ -467,7 +504,7 @@ export function clearCgalMesh() {
     if (!cgalGroup) return;
     cgalGroup.traverse(o => {
         if (o.geometry) o.geometry.dispose();
-        if (o.material) o.material.dispose();
+        if (o.material) [].concat(o.material).forEach(m => m.dispose());
     });
     if (cgalGroup.parent) cgalGroup.parent.remove(cgalGroup);
     cgalGroup = null;

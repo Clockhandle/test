@@ -31,7 +31,7 @@ export async function buildSlice(rawDataSegments, opts = {}) {
     // for slicing — we want to slice the combined terrain).
     const polylines = [], boundaries = [], holes = [], breaklines = [], scatter = [];
     for (const seg of rawDataSegments) {
-        if (!seg || seg.length === 0) continue;
+        if (!seg || seg.length === 0 || seg.isStitchRegion) continue;
         const poly = seg.map(v => [v.x, v.y, v.z]);
         if (seg.isBoundary)       boundaries.push(poly);
         else if (seg.isHole)      holes.push(poly);

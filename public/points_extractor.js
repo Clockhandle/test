@@ -11,9 +11,23 @@ export async function setupFileInput(onDataLoaded) {
 
     try {
       const fileText = await file.text();
-      
-      const data = JSON.parse(fileText);
-      
+      const lineSegments = parseMeshJson(JSON.parse(fileText));
+
+      // Pass the nested array of vertices back
+      if (onDataLoaded) {
+        onDataLoaded(lineSegments);
+      }
+
+    } catch (error) {
+      console.error('Error reading or parsing the JSON file:', error);
+      alert('Invalid JSON file!');
+    }
+  });
+}
+
+// Turn the exported AutoCAD JSON (array of entities) into line segments: arrays of
+// THREE.Vector3 carrying the entity's flags (isBoundary, featureType, …) as properties.
+export function parseMeshJson(data) {
       const lineSegments = [];
 
       data.forEach(meshItem => {
@@ -28,6 +42,12 @@ export async function setupFileInput(onDataLoaded) {
                            meshItem.Type === 'Boundary';
         const isHole      = meshItem.IsHole      === true;
         const isBreakLine = meshItem.IsBreakLine === true || meshItem.IsBreakline === true;
+        // Hybrid mesh stitch region: a closed polyline (the z-stitcher meshes inside it,
+        // CGAL outside), or — with StitchZMin/StitchZMax — a Z band of contours to stitch.
+        // Its vertices only mark where it is; they never become mesh constraints.
+        const isStitchRegion = meshItem.IsStitchRegion === true;
+        const stitchZMin = Number.isFinite(meshItem.StitchZMin) ? meshItem.StitchZMin : null;
+        const stitchZMax = Number.isFinite(meshItem.StitchZMax) ? meshItem.StitchZMax : null;
 
         // Vùng giới hạn region blocks are now identified by the explicit boolean
         // flag IsVungGioiHan rather than by string-matching the Type field.
@@ -88,7 +108,7 @@ export async function setupFileInput(onDataLoaded) {
           // If the Z value changes, start a new line segment
           // (holes, boundaries, breaklines, bemat, and mine-path lines are 3-D
           // continuous paths that must never be split by Z-layer logic)
-          if (!isBoundary && !isHole && !isBreakLine && !isBemat && !isDuongLo && currentZ !== null && currentZ !== z) {
+          if (!isBoundary && !isHole && !isBreakLine && !isBemat && !isDuongLo && !isStitchRegion && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
               currentSegment.isBoundary  = false;
               currentSegment.isBreakLine = isBreakLine;
@@ -125,6 +145,11 @@ export async function setupFileInput(onDataLoaded) {
           }
           currentSegment.isBoundary   = isBoundary;
           currentSegment.isHole       = isHole;
+          if (isStitchRegion) {
+            currentSegment.isStitchRegion = true;
+            currentSegment.stitchZMin     = stitchZMin;
+            currentSegment.stitchZMax     = stitchZMax;
+          }
           currentSegment.isBreakLine  = isBreakLine;
           currentSegment.isBemat      = isBemat;
           currentSegment.isDuongLo    = isDuongLo;
@@ -143,17 +168,8 @@ export async function setupFileInput(onDataLoaded) {
       // This ensures that layer index 0 is at the bottom and layer 'Max' is at the top,
       // fixing issues where the JSON file stores the layers out of vertical order!
       lineSegments.sort((segmentA, segmentB) => {
-        return segmentA[0].z - segmentB[0].z; 
+        return segmentA[0].z - segmentB[0].z;
       });
 
-      // Pass the nested array of vertices back
-      if (onDataLoaded) {
-        onDataLoaded(lineSegments);
-      }
-
-    } catch (error) {
-      console.error('Error reading or parsing the JSON file:', error);
-      alert('Invalid JSON file!');
-    }
-  });
+      return lineSegments;
 }

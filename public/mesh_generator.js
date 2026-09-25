@@ -27,6 +27,7 @@ export function setupMesher(scene, rawDataSegments) {
     let stitchedCount = 0;
     for (let i = 0; i < rawDataSegments.length - 1; i++) {
       let lineA = rawDataSegments[i];
+      if (lineA.isStitchRegion) continue; // hybrid-mesh marker, not a contour
       const zA = lineA[0].z;
 
       // --- DYNAMIC VERTICAL TOPOLOGY FIX ---
@@ -41,7 +42,7 @@ export function setupMesher(scene, rawDataSegments) {
 
       for (let j = i + 1; j < rawDataSegments.length; j++) {
           const lineB_cand = rawDataSegments[j];
-          if (lineB_cand.isBoundary) continue;
+          if (lineB_cand.isBoundary || lineB_cand.isStitchRegion) continue;
           const zB = lineB_cand[0].z;
           if (zB >= zA - 0.001) continue; // only look strictly downward in Z
 

@@ -63,16 +63,21 @@ function initThreeJS() {
   // ----- FAST Z-LAYER STITCHING LOGIC -----
   setupMesher(scene, rawDataSegments);
 
-  // ----- CGAL MESH BUTTON -----
+  // ----- CGAL / HYBRID MESH BUTTONS -----
+  const meshOpts = () => {
+    const slopeInput = document.getElementById('cgal-slope');
+    const slopeVal = slopeInput && slopeInput.value !== '' ? Number(slopeInput.value) : null;
+    const opts = {};
+    if (Number.isFinite(slopeVal) && slopeVal >= 0) opts.slope = slopeVal;
+    return opts;
+  };
   const cgalBtn = document.getElementById('cgal-mesh-btn');
   if (cgalBtn) {
-    cgalBtn.addEventListener('click', () => {
-      const slopeInput = document.getElementById('cgal-slope');
-      const slopeVal = slopeInput && slopeInput.value !== '' ? Number(slopeInput.value) : null;
-      const opts = {};
-      if (Number.isFinite(slopeVal) && slopeVal >= 0) opts.slope = slopeVal;
-      buildCgalMesh(rawDataSegments, meshGroup, opts);
-    });
+    cgalBtn.addEventListener('click', () => buildCgalMesh(rawDataSegments, meshGroup, meshOpts()));
+  }
+  const hybridBtn = document.getElementById('hybrid-mesh-btn');
+  if (hybridBtn) {
+    hybridBtn.addEventListener('click', () => buildCgalMesh(rawDataSegments, meshGroup, { ...meshOpts(), hybrid: true }));
   }
   // ----- VIA SOLID BUTTON -----
   const viaSolidBtn = document.getElementById('via-solid-btn');
@@ -233,6 +238,9 @@ function handleNewPoints(arrayOfLineSegments) {
           segmentArray.duongLoLayer === 'bien'      ? 0xcccccc :
           segmentArray.duongLoLayer === 'tiet dien' ? 0xaaff00 : 0xffffff;
       layerMaterial = new THREE.LineBasicMaterial({ color: duongLoColor, depthTest: false });
+    } else if (segmentArray.isStitchRegion) {
+      // Hybrid-mesh stitch region outline.
+      layerMaterial = new THREE.LineBasicMaterial({ color: 0xff00ff, depthTest: false });
     } else if (segmentArray.isBoundary) {
       layerMaterial = new THREE.LineBasicMaterial({
          color: 0xffffff,
