@@ -26,13 +26,33 @@ Verify with `npm start`, then `node samples/hybrid/check.mjs`.
 
 ## To do, in rough order
 
-0. **Strip mode seam gaps.** `uniformStitch` trims a rail end that runs >150 m past the other rail, and
-   drops near-flat triangles, which leaves gaps against the neighbouring strip (42/1346 seam segments in
-   test 5, 6/96 in test 4). I tried putting the strip's boundary arcs into rail 2 so the rails meet at their
-   ends. Test 4 then came out clean, but test 5 got 10k non-manifold edges: the zero-length end rungs collapse
-   the stitch rows. A fix needs changes in `uniformStitch` (no trim / no collapse when the rails share end
-   points). Also check the 13.8k downward-facing triangles in test 5 in the browser; they should be the
-   overturned wall.
+0. **Strip mode: the stitch doesn't follow the boundary.** This is the open problem. The current code (this
+   commit) is the version that looked right on screen; it still leaves seam gaps (42/1346 seam segments in
+   test 5, 6/96 in test 4) because `uniformStitch` trims rail ends that run >150 m past the other rail and
+   drops triangles under 0.0001 m².
+
+   Tried on 2026-10-03 and reverted (commits removed, not pushed). Each fixed the numbers but looked wrong
+   in the app:
+   - **Trimming off, tiny-triangle drop off** (`uniformStitch` options `trimOverhang: false, minArea: 1e-9`).
+     Seams closed on every sample, 0 non-manifold. But a rail that runs far past the other one is fanned to
+     the other rail's end point: in test 5 the south-west lobe became one huge fan from a single point, and
+     stitched triangles went 89k → 117k.
+   - **No in-between rows** (`rows: false`, one row of triangles from contour to contour). Test 5 dropped to
+     18.9k stitched triangles and 3.2k downward-facing, still 0 non-manifold, but the fans and the slanted
+     strips past the boundary line stayed.
+   - **Boundary arcs in rail 2** (so both rails start and end at the same points and the stitch has to follow
+     the boundary). On test 5 the boundary is built from the contours' own points, so rail 2 runs along
+     rail 1 for long stretches; the zero-length rungs give 10k non-manifold edges with rows, 85 without.
+     Dropping just the two shared end points didn't help.
+   - **CGAL in each folded strip's own best-fit plane.** Only 2 of 28 folded strips in test 5 are simple in
+     that plane: the strips are nearly horizontal and the folds are local, so the plane is just XY.
+   - Kept as an idea, not committed: skip strips with no area (where the boundary follows a contour point for
+     point, e.g. D67 at 238 in test 5). Those 42 "gaps" in test 5 are really the outer edge.
+
+   Root cause: `uniformStitch` only zips two polylines by XY distance. It has no notion of the strip's
+   outline, so at a strip's ends it cuts straight across between the two contour ends instead of following
+   the boundary. A real fix probably needs a stitcher that takes the whole strip outline (contours + boundary
+   arcs, with stretches where the boundary coincides with a contour removed first) and triangulates inside it.
 
 1. **Click through in the browser.** Load both sample files and press Hybrid Mesh. So far this was only
    checked by running the app's modules in Node against the real server. Check the amber and red
