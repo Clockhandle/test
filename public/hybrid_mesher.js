@@ -8,9 +8,13 @@
 //   • Polygon     — an IsStitchRegion closed polyline (convex hull is used). The full stitch is
 //                   clipped to it; the cut edge becomes a HOLE for CGAL, and contours are cut
 //                   at the polygon so CGAL never sees the stitched part.
-//   • Crossings   — contours of one surface that cross in plan (XY) but not in 3D. A capsule
-//                   around each crossing zone is treated like a polygon region, because CDT
-//                   holds one Z per XY and would otherwise break the surface there.
+//   • Strips      — the default when no region is drawn. The contours cut the surface into
+//                   strips (paired by where their ends sit along the boundary, not by plan
+//                   distance); a strip whose outline crosses itself in plan is a fold and is
+//                   z-stitched, every other strip goes to CGAL on its own. Seams are contours.
+//   • Crossings   — fallback when strip mode can't read the data (no contour runs boundary to
+//                   boundary): a capsule around each zone where contours cross in plan is
+//                   treated like a polygon region.
 //
 // hybridMeshGroup() returns data in the same shape as mesh_gen's JSON, so cgal_mesher.js can
 // render it like any other CGAL result, or null when the group needs no stitching.
@@ -307,8 +311,8 @@ export async function hybridMeshGroup(g, runMesh, opts = {}) {
     const contoursW = g.polylines.map(dedupe).filter(c => c.length >= 2);
 
     // Crossings are checked even without explicit regions: they are what breaks plain CGAL.
+    // (Strip mode below also catches folds where only the boundary crosses the contours.)
     const crossingHits = findCrossings(contoursW);
-    if (explicit.length === 0 && crossingHits.length === 0) return null;
 
     if (!boundaryW) {
         console.warn(`[Hybrid] ${g.boundaries.length} boundaries in this group — hybrid needs exactly one; using plain CGAL.`);
@@ -333,15 +337,38 @@ export async function hybridMeshGroup(g, runMesh, opts = {}) {
 
     const band = explicit.find(r => Number.isFinite(r.zMin) && Number.isFinite(r.zMax));
     const ctx = { B, C, O, toW, runMesh, payloadBase, warnings, crossingHits };
-    const result = band ? await bandMode(band, ctx) : await polygonMode(explicit, ctx);
+    // No regions drawn → strip mode (works out the folds by itself). If strip mode can't read
+    // the data (e.g. contours that don't end on the boundary), fall back to crossing capsules.
+    let result, mode;
+    if (band) { mode = 'band'; result = await bandMode(band, ctx); }
+    else if (explicit.length) { mode = 'polygon'; result = await polygonMode(explicit, ctx); }
+    else {
+        mode = 'strip';
+        result = await stripMode(ctx);
+        if (result && result.unsupported) {
+            warnings.push(`Strip mode not used: ${result.unsupported}`);
+            console.warn('[Hybrid]', warnings.at(-1));
+            result = null;
+            if (crossingHits.length) { mode = 'polygon'; result = await polygonMode([], ctx); }
+        }
+    }
     if (!result) return null;
 
     // Merge: stitch triangles first (so the renderer can colour them), then CGAL.
     const { patch, cgal, seams, regions } = result;
     const verts = [...patch.verts, ...cgal.verts];
     const tris = [...patch.tris.map(t => [...t]), ...cgal.tris.map(t => t.map(i => i + patch.verts.length))];
-    const merged = weld(verts, tris, WELD_TOL);
-    const stitchCount = patch.tris.length; // weld keeps triangle order; none of the stitch ones collapse
+    const merged = weld(verts, tris, result.weldTol || WELD_TOL);
+    let stitchCount = patch.tris.length; // weld keeps triangle order
+    // Two strips can both mesh the same tiny triangle where a contour stops just short of the
+    // boundary; keep only the first copy of any triangle.
+    const seenTri = new Set();
+    merged.tris = merged.tris.filter((t, i) => {
+        const k = [...t].sort((a, b) => a - b).join(',');
+        if (seenTri.has(k)) { if (i < patch.tris.length) stitchCount--; return false; }
+        seenTri.add(k);
+        return true;
+    });
     const overhang = orientConsistent(merged);
     const topo = topology(merged);
 
@@ -369,11 +396,12 @@ export async function hybridMeshGroup(g, runMesh, opts = {}) {
     if (topo.nonManifold) warnings.push(`${topo.nonManifold} non-manifold edges after welding.`);
 
     const stats = {
-        mode: band ? 'band' : 'polygon',
+        mode,
         stitchTriangles: stitchCount, cgalTriangles: cgal.tris.length,
         openLoops: topo.loops.length, nonManifold: topo.nonManifold, overhang,
         seamSegments, seamOpen, crossings: crossingHits.length,
         stitchCoverage: result.stitchCoverage,
+        ...(result.stats || {}),
     };
     console.log('[Hybrid]', stats);
     warnings.forEach(w => console.warn('[Hybrid]', w));
@@ -512,6 +540,166 @@ async function polygonMode(explicit, ctx) {
     const data = await runMesh({ ...payloadBase, polylines: trimmed.map(c => c.map(toW)), boundaries: [B.map(toW)], holes: seams.map(s => s.pts.map(toW)) });
     appendCgal(cgal, data, ctx);
     return { patch, cgal, seams, regions: usable, stitchCoverage: 1 };
+}
+
+// ── strips: no regions to draw; the contours themselves decide ──────────────────────
+// The contours cut the boundary disk into strips ("faces"). Neighbours are found from the
+// order in which contour ends sit along the boundary, so a fold that overlaps itself in plan
+// is still split correctly. A strip whose outline crosses itself in plan is folded → z-stitch;
+// every other strip → CGAL, each strip as its own boundary. Neighbouring strips share whole
+// contours (same subdivided points), so every seam is a contour and nothing is clipped.
+const STRIP_END_SNAP = 3.0;     // contour ends this close to the boundary count as on it
+const STRIP_LOOP_GAP = 5.0;     // a contour whose ends are this close is a closed loop
+const STRIP_WELD_TOL = 1e-3;    // float32 stitch output at ~1 km from the local origin is ~1e-4 off
+
+async function stripMode(ctx) {
+    const { B, C, runMesh, payloadBase, warnings, toW } = ctx;
+    const N = B.length;
+    const ringSegs = B.map((a, i) => [a, B[(i + 1) % N]]);
+    const project = q => {
+        let best = { d: Infinity };
+        for (let i = 0; i < N; i++) {
+            const a = B[i], b = B[(i + 1) % N], dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+            const t = L ? Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / L)) : 0;
+            const d = Math.hypot(q[0] - a[0] - t * dx, q[1] - a[1] - t * dy);
+            if (d < best.d) best = { d, i, t };
+        }
+        if (best.t > 1 - 1e-9) { best.i = (best.i + 1) % N; best.t = 0; }
+        return best;
+    };
+    const ptAt = (i, t) => { const [a, b] = ringSegs[i]; return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])]; };
+
+    // 1. Sort the contours: boundary-to-boundary (chords), closed loops, and left out.
+    const levels = [...new Set(C.map(c => c[0][2]))].sort((a, b) => a - b);
+    const steps = levels.slice(1).map((z, i) => z - levels[i]).sort((a, b) => a - b);
+    const zTol = Math.max(10, 3 * (steps[Math.floor(steps.length / 2)] || 0));
+    const chords = [], loops = [], leftOut = [];
+    for (const c0 of C) {
+        const c = c0.map(v => v), z = c[0][2];
+        const a = project(c[0]), b = project(c[c.length - 1]);
+        const gap = Math.hypot(c[0][0] - c[c.length - 1][0], c[0][1] - c[c.length - 1][1]);
+        if (a.d <= STRIP_END_SNAP && b.d <= STRIP_END_SNAP) {
+            // A contour whose Z is far from the boundary Z at both of its ends is mis-elevated.
+            const za = ptAt(a.i, a.t)[2], zb = ptAt(b.i, b.t)[2];
+            if (Math.abs(za - z) > zTol && Math.abs(zb - z) > zTol) { leftOut.push(`Z ${z} contour: boundary is at ${za.toFixed(0)} / ${zb.toFixed(0)} where it ends`); continue; }
+            chords.push({ p: subdivide(c), z, a, b });
+        } else if (gap < STRIP_LOOP_GAP && c.length > 3) loops.push([...c, c[0]]);
+        else leftOut.push(`Z ${z} contour (${c.length} pts): ends ${a.d.toFixed(1)} / ${b.d.toFixed(1)} from the boundary`);
+    }
+    if (leftOut.length) warnings.push(`Strip mode left out ${leftOut.length} contour(s): ${leftOut.join('; ')}.`);
+    if (chords.length < 1) return { unsupported: 'no contour runs from boundary to boundary' };
+
+    // 2. Faces: walk boundary arc → contour → boundary arc … around each strip.
+    const nodes = [];
+    chords.forEach((c, ci) => { nodes.push({ ci, end: 0, ...c.a, par: c.a.i + c.a.t }); nodes.push({ ci, end: 1, ...c.b, par: c.b.i + c.b.t }); });
+    const order = [...nodes.keys()].sort((p, q) => nodes[p].par - nodes[q].par);
+    const rank = new Map(order.map((n, k) => [n, k]));
+    const partner = n => n ^ 1; // nodes are pushed in (end 0, end 1) pairs
+    const arcPts = k => {
+        const a = nodes[order[k]], b = nodes[order[(k + 1) % order.length]];
+        const fd = x => ((x - a.par) % N + N) % N, target = fd(b.par) || N;
+        const pts = [ptAt(a.i, a.t)];
+        for (let s = 1; s <= N; s++) { const j = (a.i + s) % N, f = fd(j); if (f <= 0 || f >= target) break; pts.push(B[j]); }
+        pts.push(ptAt(b.i, b.t));
+        return dedupe(pts);
+    };
+    const used = new Set(), faces = [];
+    for (let k0 = 0; k0 < order.length; k0++) {
+        if (used.has(k0)) continue;
+        const items = [];
+        let k = k0;
+        for (let guard = 0; guard <= order.length; guard++) {
+            used.add(k);
+            items.push({ type: 'arc', pts: arcPts(k) });
+            const n = order[(k + 1) % order.length], c = chords[nodes[n].ci];
+            items.push({ type: 'c', ci: nodes[n].ci, z: c.z, pts: nodes[n].end ? [...c.p].reverse() : c.p });
+            k = rank.get(partner(n));
+            if (k === k0) break;
+        }
+        let ring = dedupe(items.flatMap(it => it.pts));
+        if (ring.length > 1 && Math.hypot(ring[0][0] - ring[ring.length - 1][0], ring[0][1] - ring[ring.length - 1][1]) < 1e-9) ring.pop();
+        faces.push({ items, ring, folds: ringSelfCrossings(ring) });
+    }
+    const folded = faces.filter(f => f.folds > 0);
+    if (!folded.length) return null;   // nothing folded: plain CGAL is fine
+
+    // 3. Stitch the folded strips: the contour on a level of its own vs the rest of the outline.
+    const sv = [], st = [];
+    let skipped = 0;
+    for (const f of folded) {
+        const cs = f.items.map((it, j) => ({ it, j })).filter(x => x.it.type === 'c');
+        const count = {};
+        cs.forEach(x => { count[x.it.z] = (count[x.it.z] || 0) + 1; });
+        const r1 = cs.find(x => count[x.it.z] === 1);
+        let g = null;
+        if (r1) {
+            // Rail 2 is the rest of the outline minus the two boundary arcs touching rail 1.
+            // (Keeping those arcs makes rail 2 start on rail 1's ends; uniformStitch then builds
+            // zero-length rungs whose rows collapse into overlapping triangles.)
+            const L = f.items.length;
+            let rail2 = [];
+            if (cs.length === 1) rail2 = f.items[(r1.j + 1) % L].pts;
+            else for (let s = 2; s <= L - 2; s++) rail2 = rail2.concat(f.items[(r1.j + s) % L].pts);
+            g = uniformStitch(r1.it.pts.map(v => new THREE.Vector3(...v)), dedupe(rail2).map(v => new THREE.Vector3(...v)), MAX_EDGE);
+        }
+        if (!g) { f.folds = 0; skipped++; continue; }   // can't stitch: CGAL takes it (with crossing vertices)
+        const pos = g.attributes.position.array, idx = g.index.array, base = sv.length;
+        for (let q = 0; q < pos.length; q += 3) sv.push([pos[q], pos[q + 1], pos[q + 2]]);
+        for (let q = 0; q < idx.length; q += 3) st.push([base + idx[q], base + idx[q + 1], base + idx[q + 2]]);
+        g.dispose();
+    }
+    if (skipped) warnings.push(`${skipped} folded strip(s) have no contour on a level of their own and were left to CGAL.`);
+    const patch = weld(sv, st, STRIP_WELD_TOL);
+    orientConsistent(patch);
+
+    // 4. CGAL on every other strip, each as its own boundary. Slope filter off: a steep strip
+    //    is still part of the surface, and dropping it would leave a hole between strips.
+    const flat = faces.filter(f => f.folds === 0);
+    if (loops.length && folded.some(f => f.folds && loops.some(l => pointInPolygon(l[0], f.ring))))
+        warnings.push('A closed contour loop lies inside a stitched strip; the stitch ignores it.');
+    const cgal = { verts: [], tris: [], orphans: 0, droppedSlope: 0 };
+    if (flat.length) {
+        const data = await runMesh({ ...payloadBase, slope: 0, polylines: loops.map(l => l.map(toW)), boundaries: flat.map(f => f.ring.map(toW)) });
+        appendCgal(cgal, data, ctx);
+        // The subdivided contours have runs of collinear points; mesh_gen's weld grid nudges
+        // them off the line and the CDT can keep a hair-thin triangle along a contour, which
+        // overlaps the real one beside it (non-manifold edge). Drop triangles under 1 mm thick.
+        const before = cgal.tris.length;
+        cgal.tris = cgal.tris.filter(t => {
+            const [a, b, c] = t.map(i => cgal.verts[i]);
+            const longest = Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), Math.hypot(c[0] - b[0], c[1] - b[1]), Math.hypot(a[0] - c[0], a[1] - c[1]));
+            return longest > 0 && 2 * Math.abs(signedArea(a, b, c)) / longest > 1e-3;
+        });
+        cgal.slivers = before - cgal.tris.length;
+    }
+
+    // Seams: contours with a stitched strip on one side and a CGAL strip on the other.
+    const sides = chords.map(() => new Set());
+    faces.forEach(f => f.items.forEach(it => { if (it.type === 'c') sides[it.ci].add(f.folds > 0 ? 's' : 'c'); }));
+    const seams = chords.filter((_, i) => sides[i].size === 2).map(c => ({ closed: false, pts: c.p }));
+    const regions = faces.filter(f => f.folds > 0).map(f => ({ kind: 'strip', poly: f.ring }));
+    return {
+        patch, cgal, seams, regions, stitchCoverage: 1, weldTol: STRIP_WELD_TOL,
+        stats: { strips: faces.length, stitchedStrips: regions.length, cgalStrips: flat.length, closedLoops: loops.length, leftOut: leftOut.length },
+    };
+}
+
+// Number of proper crossings between non-adjacent edges of a closed ring, in XY.
+function ringSelfCrossings(R) {
+    const n = R.length;
+    const bb = R.map((a, i) => { const b = R[(i + 1) % n]; return [Math.min(a[0], b[0]), Math.max(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[1], b[1])]; });
+    let hits = 0;
+    for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
+        if (i === 0 && j === n - 1) continue;
+        const A = bb[i], D = bb[j];
+        if (A[1] < D[0] || D[1] < A[0] || A[3] < D[2] || D[3] < A[2]) continue;
+        const P = R[i], Q = R[(i + 1) % n], S = R[j], T = R[(j + 1) % n];
+        const dx = Q[0] - P[0], dy = Q[1] - P[1], ex = T[0] - S[0], ey = T[1] - S[1], den = cross2(dx, dy, ex, ey);
+        if (Math.abs(den) < 1e-12) continue;
+        const t = cross2(S[0] - P[0], S[1] - P[1], ex, ey) / den, u = cross2(S[0] - P[0], S[1] - P[1], dx, dy) / den;
+        if (t > 1e-9 && t < 1 - 1e-9 && u > 1e-9 && u < 1 - 1e-9) hits++;
+    }
+    return hits;
 }
 
 function appendCgal(cgal, data, { O }) {

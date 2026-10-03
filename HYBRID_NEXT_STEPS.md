@@ -10,7 +10,13 @@ Branch `hybrid-mesher` (off `CGAL_delaunay_for_simple_datasets`), not pushed.
 - **Region sources:**
   - an `IsStitchRegion` polygon (the stitch is clipped to it, and the cut edge becomes a CGAL `HOLE`);
   - an `IsStitchRegion` with `StitchZMin`/`StitchZMax` (a Z band whose end contours are the seams);
-  - automatic capsules around contours that cross in plan.
+  - **strip mode (default when no region is drawn):** the contours cut the surface into strips, paired by
+    the order of their ends along the boundary. Strips whose outline crosses itself in plan are stitched,
+    the rest go to CGAL one strip at a time. Seams are contours. See `samples/hybrid/README.md`.
+  - automatic capsules around contours that cross in plan (now only a fallback when strip mode can't
+    read the data).
+- **Why strips:** circling regions by hand doesn't scale. Folds that touch the boundary (test 4) or run
+  along a long curved arm (test 5) can't be covered by a convex region.
 - **`mesh_gen` fixes:** CDT crossing vertices get an interpolated Z instead of 0, and JSON output uses 17
   digits instead of 10. Both binaries (`cpp/build/Release`, `cpp/build-linux`) are rebuilt.
 - **Samples and check:** [samples/hybrid/](samples/hybrid/) has two input files reproducing the three
@@ -19,6 +25,14 @@ Branch `hybrid-mesher` (off `CGAL_delaunay_for_simple_datasets`), not pushed.
 Verify with `npm start`, then `node samples/hybrid/check.mjs`.
 
 ## To do, in rough order
+
+0. **Strip mode seam gaps.** `uniformStitch` trims a rail end that runs >150 m past the other rail, and
+   drops near-flat triangles, which leaves gaps against the neighbouring strip (42/1346 seam segments in
+   test 5, 6/96 in test 4). I tried putting the strip's boundary arcs into rail 2 so the rails meet at their
+   ends. Test 4 then came out clean, but test 5 got 10k non-manifold edges: the zero-length end rungs collapse
+   the stitch rows. A fix needs changes in `uniformStitch` (no trim / no collapse when the rails share end
+   points). Also check the 13.8k downward-facing triangles in test 5 in the browser; they should be the
+   overturned wall.
 
 1. **Click through in the browser.** Load both sample files and press Hybrid Mesh. So far this was only
    checked by running the app's modules in Node against the real server. Check the amber and red

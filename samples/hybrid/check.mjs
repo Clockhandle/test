@@ -55,7 +55,7 @@ function summarise(group) {
     return rows;
 }
 
-for (const file of ['hybrid_test1_circle.json', 'hybrid_test2_3_band_crossing.json']) {
+for (const file of ['hybrid_test1_circle.json', 'hybrid_test2_3_band_crossing.json', 'hybrid_test4_twisting_lines.json', 'hybrid_test5_vach_tru_hep.json']) {
     const segs = parseMeshJson(JSON.parse(fs.readFileSync(path.join(here, file), 'utf8')));
     segs.sort((a, b) => (!a.length || !b.length) ? 0 : b[0].z - a[0].z); // as main.js does on load
     print(`\n${file}`);
