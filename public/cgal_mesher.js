@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { hybridMeshGroup } from './hybrid_mesher.js';
+import { ownerBoundary } from './boundary_trim.js';
 
 let cgalGroup = null;
 
@@ -122,8 +123,13 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
         console.log(`[CGAL] No boundary for "${g.viaName}/${g.blockName}/${g.featureType}" — convex hull auto-boundary (${hull.length} pts, pad=${pad.toFixed(1)}m)`);
     }
 
+    // A group with several boundaries (e.g. two Bề mặt surfaces stacked in plan) becomes
+    // one group per boundary, each with only the lines it owns (plan containment + nearest Z).
+    // mesh_gen itself assigns lines by plan view alone, so a boundary would otherwise pull
+    // in the lines of the surface below it and mash both into one CDT.
     const meshableGroups = [...groups.values()]
-        .filter(g => g.boundaries.length > 0);
+        .filter(g => g.boundaries.length > 0)
+        .flatMap(splitByBoundary);
     if (meshableGroups.length === 0) {
         alert('No meshable data found — no polylines, breaklines, or scatter points in any group.');
         return;
@@ -226,6 +232,25 @@ export async function buildCgalMesh(rawDataSegments, meshGroup, opts = {}) {
     //clampTruToVach(cgalGroup);
 }
 
+function splitByBoundary(g) {
+    if (g.boundaries.length < 2) return [g];
+    const parts = g.boundaries.map(b => ({ ...g, boundaries: [b], polylines: [], holes: [], breaklines: [], scatter: [], stitchRegions: [] }));
+    const assign = (items, key, lineOf = x => x) => {
+        for (const it of items) {
+            const i = ownerBoundary(lineOf(it), g.boundaries);
+            if (i >= 0) parts[i][key].push(it);
+        }
+    };
+    assign(g.polylines, 'polylines');
+    assign(g.holes, 'holes');
+    assign(g.breaklines, 'breaklines');
+    assign(g.scatter, 'scatter', pt => [pt]);
+    assign(g.stitchRegions, 'stitchRegions', r => r.poly);
+    console.log(`[CGAL] "${g.viaName}/${g.blockName}/${g.featureType}": ${g.boundaries.length} boundaries meshed separately`,
+        parts.map(p => `${p.polylines.length} lines`).join(', '));
+    return parts;
+}
+
 // POST one mesh_gen request; resolves to its JSON, throws on failure.
 async function requestMesh(payload) {
     const resp = await fetch('/api/mesh', {
@@ -313,6 +338,7 @@ function renderMeshes(results, meshGroup) {
             const wireMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 });
             const wire = new THREE.LineSegments(wireGeom, wireMat);
             wire.name = `CGAL_Mesh_${globalIndex}_Wire`;
+            wire.raycast = () => {};  // hover/picking hit the mesh itself; testing every edge again is pure cost
             if (featureType) wire.userData.featureType = featureType;
             mesh.add(wire);
 

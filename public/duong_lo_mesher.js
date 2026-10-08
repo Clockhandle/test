@@ -315,7 +315,7 @@ function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset,
         const xs = td.map(p => p.x);
         const ys = td.map(p => p.y); 
         const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        const cy = (Math.min(...ys));
 
         const profile = new THREE.Shape();
         const first = td[0], last = td[td.length - 1];

@@ -58,9 +58,21 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
       }
   });
 
-  // Handle mouse movement for snapping and tooltip
+  // Handle mouse movement for snapping and tooltip.
+  // Raycasting the whole scene is the expensive part, so it runs at most once per
+  // frame (on the latest event), and not at all while a button is held to orbit.
+  let pendingMove = null;
   window.addEventListener('pointermove', (event) => {
+      if (!pendingMove) requestAnimationFrame(() => { const e = pendingMove; pendingMove = null; onPointerMove(e); });
+      pendingMove = event;
+  });
+
+  function onPointerMove(event) {
       const tooltip = document.getElementById('hover-tooltip');
+      if (!isDrawing && event.buttons !== 0) {
+        if (tooltip) tooltip.style.display = 'none';
+        return;
+      }
 
       mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
       mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -74,7 +86,11 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
         const intersect = intersects[0];
         let targetPoint = intersect.point;
 
-        const layerIndex = meshGroup.children.indexOf(intersect.object);
+        // Merged line objects (main.js) map each vertex back to its source line.
+        const { segIndex, vtxIndex } = intersect.object.userData;
+        const layerIndex = segIndex && intersect.index !== undefined
+          ? segIndex[intersect.index]
+          : meshGroup.children.indexOf(intersect.object);
 
         // Update Tooltip (always, even when not in draw mode)
         if (tooltip) {
@@ -82,17 +98,15 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
           tooltip.style.left = event.clientX + 15 + 'px';
           tooltip.style.top = event.clientY + 15 + 'px';
           let zValue = targetPoint.z;
-          if (intersect.object.type === 'Line') {
-            const positions = intersect.object.geometry.attributes.position;
-            if (positions.count > 0) zValue = positions.getZ(0);
-          }
+          if (intersect.object.isLine && intersect.index !== undefined)
+            zValue = intersect.object.geometry.attributes.position.getZ(intersect.index);
           tooltip.innerHTML = `<strong>Layer:</strong> ${layerIndex}<br/><strong>Z-Elevation:</strong> ${zValue.toFixed(3)}`;
         }
 
         if (!isDrawing || !snapSphere) return; // Only process snapping if drawing is active
 
         // "Snap" to the absolute closest mathematical vertex rather than just anywhere on the line
-        if (intersect.object.type === 'Line' && intersect.index !== undefined) {
+        if (intersect.object.isLine && intersect.index !== undefined) {
           const positions = intersect.object.geometry.attributes.position;      
 
           // The raycaster gives us an index into the geometry's buffer array   
@@ -110,7 +124,9 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
           // PERFECT TOPOLOGY FIX: Store exactly which layer and vertex index we snapped to
           snapSphere.userData = {
              layerIndex: layerIndex,
-             vertexIndex: isP1 ? intersect.index : intersect.index + 1
+             vertexIndex: vtxIndex
+               ? vtxIndex[isP1 ? intersect.index : intersect.index + 1]
+               : (isP1 ? intersect.index : intersect.index + 1)
           };
         }
 
@@ -147,7 +163,7 @@ export function setupBoundaryDrawer(scene, camera, controls, meshGroup) {
            tempLine.computeLineDistances(); // REQUIRED for Dashed material to loop properly
         }
       }
-  });
+  }
 
   // Handle mouse down (START Dragging)
   window.addEventListener('pointerdown', (event) => {

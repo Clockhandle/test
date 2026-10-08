@@ -12,6 +12,7 @@ import { setupTypeToggles } from './type_toggles.js';
 import { setupClipTest } from './clip_test.js';
 import { buildSlice, renderSlices, exportDxf, AXIS_MAP } from './slicer_ui.js';
 import { buildDuongLoMesh } from './duong_lo_mesher.js';
+import { trimToBoundaries } from './boundary_trim.js';
 
 let geometry, camera, line, scene, meshGroup
 const rawDataSegments = []; // Keep a reference to the untouched original lines
@@ -200,6 +201,12 @@ function initThreeJS() {
 }
 
 function handleNewPoints(arrayOfLineSegments) {
+  // Hard-trim every line to its group's boundary (plan view) before anything uses it.
+  const trim = trimToBoundaries(arrayOfLineSegments);
+  arrayOfLineSegments = trim.segments;
+  if (trim.removedVerts > 0)
+    console.log(`[trim] ${trim.removedVerts} vertices outside the boundary removed: ${trim.trimmedLines} line(s) trimmed, ${trim.droppedLines} dropped`);
+
   // Sort the lines topologically by their Z height so algorithms that walk the layers (like the Mesher)
   // don't get completely confused if the JSON file has elements randomly out-of-order!
   arrayOfLineSegments.sort((a, b) => {
@@ -214,60 +221,21 @@ function handleNewPoints(arrayOfLineSegments) {
   // call-stack argument and throws "Maximum call stack size exceeded" on big files.
   for (const seg of arrayOfLineSegments) rawDataSegments.push(seg);
 
-  // Clear out ANY old lines/points inside the group
+  // Clear out ANY old lines/points inside the group (and free their GPU buffers)
+  meshGroup.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) [].concat(o.material).forEach(m => m.dispose());
+  });
   meshGroup.clear();
 
   // Automatically clear old drawn boundaries so they don't incorrectly apply to the new file
   clearBoundaries();
 
-  const centerBox = new THREE.Box3(); // To calculate total bounds
-
-  arrayOfLineSegments.forEach((segmentArray, index) => {
-    // TietDien vertices are in local CAD block space, not world coords — exclude from scene
-    if (segmentArray.isDuongLo && segmentArray.duongLoLayer === 'tiet dien') return;
-
-    const hue = (index / arrayOfLineSegments.length) * 360; 
-    let layerMaterial;
-    
-    if (segmentArray.isDuongLo) {
-      // Mine-tunnel skeleton: colour by layer type
-      //   Nền = orange, Nóc = cyan, Biên = light grey, Tiết diện = lime
-      const duongLoColor =
-          segmentArray.duongLoLayer === 'nen'       ? 0xff8800 :
-          segmentArray.duongLoLayer === 'noc'       ? 0x00ddff :
-          segmentArray.duongLoLayer === 'bien'      ? 0xcccccc :
-          segmentArray.duongLoLayer === 'tiet dien' ? 0xaaff00 : 0xffffff;
-      layerMaterial = new THREE.LineBasicMaterial({ color: duongLoColor, depthTest: false });
-    } else if (segmentArray.isStitchRegion) {
-      // Hybrid-mesh stitch region outline.
-      layerMaterial = new THREE.LineBasicMaterial({ color: 0xff00ff, depthTest: false });
-    } else if (segmentArray.isBoundary) {
-      layerMaterial = new THREE.LineBasicMaterial({
-         color: 0xffffff,
-         linewidth: 3,
-      });
-    } else {
-      layerMaterial = new THREE.LineBasicMaterial({
-        color: new THREE.Color(`hsl(${Math.floor(hue)}, 100%, 65%)`),
-      });
-    }
-
-    const newGeom = new THREE.BufferGeometry().setFromPoints(segmentArray);
-    
-    // ... rest of your code ...
-    
-    // Add that geometry bounding box into our 'total scene bounds' calculation
-    newGeom.computeBoundingBox();
-    centerBox.expandByPoint(newGeom.boundingBox.min);
-    centerBox.expandByPoint(newGeom.boundingBox.max);
-
-    // Create an independent line, then add it to our parent mesh group!
-    const newLine = new THREE.Line(newGeom, layerMaterial);
-    if (segmentArray.featureType)  newLine.userData.featureType  = segmentArray.featureType;
-    if (segmentArray.isDuongLo)    newLine.userData.isDuongLo    = true;
-    if (segmentArray.duongLoLayer) newLine.userData.duongLoLayer = segmentArray.duongLoLayer;
-    meshGroup.add(newLine);
-  });
+  const centerBox = buildLineObjects(arrayOfLineSegments).reduce((box, obj) => {
+    meshGroup.add(obj);
+    obj.geometry.computeBoundingBox();
+    return box.union(obj.geometry.boundingBox);
+  }, new THREE.Box3());
 
   // 3. Re-center the entire mesh group and camera
   const center = new THREE.Vector3();
@@ -280,6 +248,68 @@ function handleNewPoints(arrayOfLineSegments) {
 
   meshGroup.position.set(-center.x, -center.y, -center.z);
   camera.position.z = maxDim > 0 ? maxDim * 1.5 : 5;
+}
+
+// Draw all loaded lines as a handful of merged LineSegments objects — one per
+// (kind, featureType, duong lo layer) — instead of one THREE.Line per polyline: a
+// dataset of thousands of lines was thousands of draw calls every frame.
+// Per vertex, userData.segIndex / vtxIndex give the source line's index in the
+// loaded array (= rawDataSegments) and the vertex's index within that line, so the
+// tooltip and the boundary drawer's snapping can still name the line they hit.
+const DUONG_LO_COLORS = { nen: 0xff8800, noc: 0x00ddff, bien: 0xcccccc };
+
+function buildLineObjects(segments) {
+  const buckets = new Map();
+  segments.forEach((seg, index) => {
+    if (seg.length < 2) return; // single points draw nothing as a line
+    // TietDien vertices are in local CAD block space, not world coords — exclude from scene
+    if (seg.isDuongLo && seg.duongLoLayer === 'tiet dien') return;
+    const kind = seg.isDuongLo ? 'duongLo' : seg.isStitchRegion ? 'stitch' : seg.isBoundary ? 'boundary' : 'line';
+    const key = `${kind}|${seg.featureType || ''}|${seg.isDuongLo ? seg.duongLoLayer : ''}`;
+    if (!buckets.has(key)) buckets.set(key, { kind, seg, items: [], nVerts: 0 });
+    const b = buckets.get(key);
+    b.items.push(index);
+    b.nVerts += (seg.length - 1) * 2;
+  });
+
+  const color = new THREE.Color();
+  const objects = [];
+  for (const { kind, seg: first, items, nVerts } of buckets.values()) {
+    const pos = new Float32Array(nVerts * 3);
+    const col = kind === 'line' ? new Float32Array(nVerts * 3) : null;
+    const segIndex = new Uint32Array(nVerts), vtxIndex = new Uint32Array(nVerts);
+    let o = 0;
+    for (const index of items) {
+      const seg = segments[index];
+      if (col) color.setHSL(Math.floor((index / segments.length) * 360) / 360, 1.0, 0.65, THREE.SRGBColorSpace);
+      for (let i = 0; i + 1 < seg.length; i++) {
+        for (const k of [i, i + 1]) {
+          pos[o * 3] = seg[k].x; pos[o * 3 + 1] = seg[k].y; pos[o * 3 + 2] = seg[k].z;
+          if (col) { col[o * 3] = color.r; col[o * 3 + 1] = color.g; col[o * 3 + 2] = color.b; }
+          segIndex[o] = index; vtxIndex[o] = k;
+          o++;
+        }
+      }
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    if (col) geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+
+    const material =
+        kind === 'duongLo'  ? new THREE.LineBasicMaterial({ color: DUONG_LO_COLORS[first.duongLoLayer] ?? 0xffffff, depthTest: false })
+      : kind === 'stitch'   ? new THREE.LineBasicMaterial({ color: 0xff00ff, depthTest: false }) // hybrid-mesh stitch region outline
+      : kind === 'boundary' ? new THREE.LineBasicMaterial({ color: 0xffffff })
+      :                       new THREE.LineBasicMaterial({ vertexColors: true });
+
+    const obj = new THREE.LineSegments(geom, material);
+    obj.name = `Lines_${kind}${first.featureType ? '_' + first.featureType : ''}`;
+    obj.userData = { loadedLines: true, segIndex, vtxIndex };
+    if (first.featureType)  obj.userData.featureType  = first.featureType;
+    if (first.isDuongLo)    obj.userData.isDuongLo    = true;
+    if (first.duongLoLayer) obj.userData.duongLoLayer = first.duongLoLayer;
+    objects.push(obj);
+  }
+  return objects;
 }
 
 load();

@@ -1,7 +1,8 @@
 // CDT mesh generator — Constrained Delaunay + slope-only spike filter.
 //
 // Pipeline per boundary:
-//   1. Collect contour lines whose first vertex lies inside this boundary.
+//   1. Collect contour lines whose first vertex lies inside this boundary, and
+//      trim them (and breaklines) to it in plan view — Z interpolated at the cut.
 //   2. Insert all contour + boundary vertices into a fresh CGAL CDT.
 //   3. Insert every consecutive pair of contour vertices as a constrained edge
 //      (breakline), so the CDT is forced to include those survey line edges.
@@ -100,6 +101,52 @@ static bool point_in_polygon_xy(double px, double py, const Polyline& poly)
             inside = !inside;
     }
     return inside;
+}
+
+// Trim an open polyline to a polygon in plan view: the cut is vertical, so each
+// new end sits on the boundary edge with Z interpolated along the contour segment
+// it cuts. Returns the inside pieces; a line that leaves and re-enters gives several.
+static std::vector<Polyline> trim_to_polygon_xy(const Polyline& line, const Polyline& poly)
+{
+    std::vector<Polyline> pieces;
+    const std::size_t n = poly.size();
+    if (line.size() < 2 || n < 3) return pieces;
+
+    // Split every segment at its crossings with the polygon edges.
+    Polyline pts{ line[0] };
+    for (std::size_t i = 0; i + 1 < line.size(); ++i) {
+        const auto& P = line[i];
+        const auto& Q = line[i + 1];
+        const double dx = Q[0] - P[0], dy = Q[1] - P[1];
+        std::vector<double> ts;
+        for (std::size_t k = 0; k < n; ++k) {
+            const auto& A = poly[k];
+            const auto& B = poly[(k + 1) % n];
+            const double ex = B[0] - A[0], ey = B[1] - A[1];
+            const double den = dx * ey - dy * ex;
+            if (std::abs(den) < 1e-15) continue;
+            const double ax = A[0] - P[0], ay = A[1] - P[1];
+            const double t = (ax * ey - ay * ex) / den;
+            const double u = (ax * dy - ay * dx) / den;
+            if (t > 1e-12 && t < 1.0 - 1e-12 && u >= 0.0 && u <= 1.0) ts.push_back(t);
+        }
+        std::sort(ts.begin(), ts.end());
+        for (double t : ts)
+            pts.push_back({ P[0] + t * dx, P[1] + t * dy, P[2] + t * (Q[2] - P[2]) });
+        pts.push_back(Q);
+    }
+
+    // Keep the runs of sub-segments whose midpoint is inside.
+    Polyline* cur = nullptr;
+    for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+        const double mx = (pts[i][0] + pts[i + 1][0]) / 2.0;
+        const double my = (pts[i][1] + pts[i + 1][1]) / 2.0;
+        if (point_in_polygon_xy(mx, my, poly)) {
+            if (!cur) { pieces.push_back({ pts[i] }); cur = &pieces.back(); }
+            cur->push_back(pts[i + 1]);
+        } else cur = nullptr;
+    }
+    return pieces;
 }
 
 // Hash vertex handle by the address of its underlying object.
@@ -206,8 +253,13 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
     // contour, so Delaunay only fills the between-contour gaps.  Without
     // constraints the Delaunay criterion can connect vertices across multiple
     // Z-level contours, producing spike triangles.
-    for (const Polyline* pp : contours) {
-        const Polyline& p = *pp;
+    // Contours are trimmed to the boundary first, so a vertex poking outside is cut
+    // off at the boundary edge instead of dragging a constraint across it.
+    std::vector<Polyline> trimmed_contours;
+    for (const Polyline* pp : contours)
+        for (auto& piece : trim_to_polygon_xy(*pp, boundary))
+            trimmed_contours.push_back(std::move(piece));
+    for (const Polyline& p : trimmed_contours) {
         if (p.size() < 2) continue;
         std::vector<VH> cvh(p.size());
         for (std::size_t i = 0; i < p.size(); ++i)
@@ -245,8 +297,11 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
         }
     };
     std::unordered_set<VHPair, VHPairHash> breakline_edges;
-    for (const Polyline* bp : breaklines) {
-        const Polyline& bl = *bp;
+    std::vector<Polyline> trimmed_breaklines;
+    for (const Polyline* bp : breaklines)
+        for (auto& piece : trim_to_polygon_xy(*bp, boundary))
+            trimmed_breaklines.push_back(std::move(piece));
+    for (const Polyline& bl : trimmed_breaklines) {
         if (bl.size() < 2) continue;
         std::vector<VH> bvh(bl.size());
         for (std::size_t i = 0; i < bl.size(); ++i)
@@ -572,15 +627,44 @@ int main(int argc, char** argv)
         return false;
     };
 
+    // Boundaries can be stacked at different Z and overlap in plan (e.g. two Be mat
+    // surfaces). A line goes to the containing boundary nearest in Z — gap between the
+    // Z ranges, then difference of mean Z — never just the first one found, or the upper
+    // boundary would swallow the lower surface's lines.
+    struct ZStat { double lo, hi, mean; };
+    auto zstat = [](const Polyline& p) {
+        ZStat s{ std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0 };
+        for (const auto& v : p) { s.lo = std::min(s.lo, v[2]); s.hi = std::max(s.hi, v[2]); s.mean += v[2]; }
+        if (!p.empty()) s.mean /= static_cast<double>(p.size());
+        return s;
+    };
+    std::vector<ZStat> bz;
+    for (const auto& b : boundaries) bz.push_back(zstat(b));
+    auto pick_boundary = [&](const Polyline& c, auto&& contains) -> int {
+        const ZStat lz = zstat(c);
+        int best = -1;
+        double best_gap = 0.0, best_diff = 0.0;
+        for (std::size_t b = 0; b < boundaries.size(); ++b) {
+            if (!contains(b)) continue;
+            const double gap  = std::max({ 0.0, bz[b].lo - lz.hi, lz.lo - bz[b].hi });
+            const double diff = std::abs(bz[b].mean - lz.mean);
+            if (best < 0 || gap < best_gap || (gap == best_gap && diff < best_diff)) {
+                best = static_cast<int>(b); best_gap = gap; best_diff = diff;
+            }
+        }
+        return best;
+    };
+    auto pick_for_line = [&](const Polyline& c) {
+        return pick_boundary(c, [&](std::size_t b) { return contour_probe_inside(c, b); });
+    };
+
     // Store contour indices per boundary so we can trace bad lines back to the source.
     std::vector<std::vector<int>> per_boundary_idx(boundaries.size());
     std::vector<int> orphan_indices;
     for (int ci = 0; ci < static_cast<int>(contours.size()); ++ci) {
         const auto& c = contours[ci];
         if (c.empty()) continue;
-        int hit = -1;
-        for (std::size_t b = 0; b < boundaries.size(); ++b)
-            if (contour_probe_inside(c, b)) { hit = static_cast<int>(b); break; }
+        const int hit = pick_for_line(c);
         if (hit >= 0) per_boundary_idx[hit].push_back(ci);
         else orphan_indices.push_back(ci);
     }
@@ -601,10 +685,7 @@ int main(int argc, char** argv)
     for (int hi = 0; hi < static_cast<int>(holes.size()); ++hi) {
         const auto& h = holes[hi];
         if (h.empty()) continue;
-        int matched = -1;
-        for (std::size_t b = 0; b < boundaries.size(); ++b) {
-            if (contour_probe_inside(h, b)) { matched = static_cast<int>(b); break; }
-        }
+        const int matched = pick_for_line(h);
         if (matched >= 0) per_boundary_holes[matched].push_back(hi);
         else std::cerr << "[mesh_gen] hole " << hi << " did not match any boundary (orphan hole).\n";
     }
@@ -620,9 +701,7 @@ int main(int argc, char** argv)
     for (int bli = 0; bli < static_cast<int>(breaklines.size()); ++bli) {
         const auto& bl = breaklines[bli];
         if (bl.empty()) continue;
-        int hit = -1;
-        for (std::size_t b = 0; b < boundaries.size(); ++b)
-            if (contour_probe_inside(bl, b)) { hit = static_cast<int>(b); break; }
+        const int hit = pick_for_line(bl);
         if (hit >= 0) per_boundary_bl[hit].push_back(bli);
         else std::cerr << "[mesh_gen] breakline " << bli << " did not match any boundary (orphan).\n";
     }
@@ -631,9 +710,8 @@ int main(int argc, char** argv)
     std::vector<std::vector<int>> per_boundary_sc(boundaries.size());
     for (int sci = 0; sci < static_cast<int>(scatter.size()); ++sci) {
         const auto& pt = scatter[sci];
-        int hit = -1;
-        for (std::size_t b = 0; b < boundaries.size(); ++b)
-            if (point_in_polygon_xy(pt[0], pt[1], boundaries[b])) { hit = static_cast<int>(b); break; }
+        const int hit = pick_boundary(Polyline{ pt },
+            [&](std::size_t b) { return point_in_polygon_xy(pt[0], pt[1], boundaries[b]); });
         if (hit >= 0) per_boundary_sc[hit].push_back(sci);
     }
 
