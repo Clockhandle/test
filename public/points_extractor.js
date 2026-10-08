@@ -107,8 +107,10 @@ export function parseMeshJson(data) {
           
           // If the Z value changes, start a new line segment
           // (holes, boundaries, breaklines, bemat, and mine-path lines are 3-D
-          // continuous paths that must never be split by Z-layer logic)
-          if (!isBoundary && !isHole && !isBreakLine && !isBemat && !isDuongLo && !isStitchRegion && currentZ !== null && currentZ !== z) {
+          // continuous paths that must never be split by Z-layer logic).
+          // Vùng giới hạn lines are too: they come as top/bottom (Trên/Chân) pairs of
+          // 3-D lines, meshed like Bề mặt so the CDT drops the surface between them.
+          if (!isBoundary && !isHole && !isBreakLine && !isBemat && !isVungGioiHan && !isDuongLo && !isStitchRegion && currentZ !== null && currentZ !== z) {
             if (currentSegment.length > 0) {
               currentSegment.isBoundary  = false;
               currentSegment.isBreakLine = isBreakLine;
