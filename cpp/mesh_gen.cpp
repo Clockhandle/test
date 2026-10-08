@@ -318,6 +318,33 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
     for (const auto& pt : scatter)
         ins(pt[0], pt[1], pt[2]);
 
+    // --- vertices on the boundary take the boundary's Z ---
+    // The mesh edge must be the boundary line itself, so every vertex lying on it (its
+    // corners, contour ends trimmed onto it, constraint crossings on it) gets the Z
+    // interpolated along the boundary edge, not the contour's own Z.
+    std::unordered_set<VH, VHHash> on_boundary;
+    const double boundary_tol = std::max(weld_tolerance, 1e-6);
+    {
+        const std::size_t n = boundary.size();
+        const double tol = boundary_tol;
+        for (auto vit = cdt.finite_vertices_begin(); vit != cdt.finite_vertices_end(); ++vit) {
+            const double px = vit->point().x(), py = vit->point().y();
+            for (std::size_t k = 0; k < n; ++k) {
+                const auto& A = boundary[k];
+                const auto& B = boundary[(k + 1) % n];
+                const double ex = B[0] - A[0], ey = B[1] - A[1];
+                const double len2 = ex * ex + ey * ey;
+                if (len2 == 0.0) continue;
+                const double t = std::clamp(((px - A[0]) * ex + (py - A[1]) * ey) / len2, 0.0, 1.0);
+                if (std::hypot(px - A[0] - t * ex, py - A[1] - t * ey) > tol) continue;
+                vit->info() = A[2] + t * (B[2] - A[2]);
+                has_z.insert(vit);
+                on_boundary.insert(vit);
+                break;
+            }
+        }
+    }
+
     // --- Z for vertices CGAL created at constraint crossings ---
     // With Exact_predicates_tag, crossing constraints are split at a new vertex
     // whose info() we never set (it read back as Z = 0, and the slope filter then
@@ -380,12 +407,26 @@ static MeshOut mesh_boundary(const Polyline&                          boundary,
         }
         if (in_hole) { ++out.dropped_hole; continue; }
 
-        // Slope filter — drop spike triangles (breakline-adjacent triangles exempt).
+        // Flat sliver along the boundary: three boundary vertices in a line (one a hair
+        // inside the boundary constraint, so CGAL didn't split it there). It has no area
+        // and would leave overlapping open edges along the boundary.
+        if (on_boundary.count(v0) && on_boundary.count(v1) && on_boundary.count(v2)) {
+            const double area2 = std::abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+            const double longest = std::sqrt(std::max({ (x1-x0)*(x1-x0) + (y1-y0)*(y1-y0),
+                                                        (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1),
+                                                        (x0-x2)*(x0-x2) + (y0-y2)*(y0-y2) }));
+            if (longest == 0.0 || area2 / longest <= 2.0 * boundary_tol) continue;
+        }
+
+        // Slope filter — drop spike triangles. Breakline-adjacent triangles are exempt, and
+        // so are triangles touching the boundary: they are what ties the surface down to
+        // the boundary line, and dropping them leaves a gap along it.
         if (slope_threshold > 0.0) {
-            bool exempt = !breakline_edges.empty() &&
-                          (breakline_edges.count(make_vhpair(v0, v1)) ||
-                           breakline_edges.count(make_vhpair(v1, v2)) ||
-                           breakline_edges.count(make_vhpair(v2, v0)));
+            bool exempt = (!breakline_edges.empty() &&
+                           (breakline_edges.count(make_vhpair(v0, v1)) ||
+                            breakline_edges.count(make_vhpair(v1, v2)) ||
+                            breakline_edges.count(make_vhpair(v2, v0)))) ||
+                          on_boundary.count(v0) || on_boundary.count(v1) || on_boundary.count(v2);
             if (!exempt) {
                 double z0 = v0->info(), z1 = v1->info(), z2 = v2->info();
                 double zmin = std::min({ z0, z1, z2 });
