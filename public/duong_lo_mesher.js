@@ -440,7 +440,10 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
     meshGroup.add(grp);
 
     const evaluator = new Evaluator();
-    evaluator.useGroups = true; 
+    evaluator.useGroups = true;
+    // The legacy splitter uses a fixed 1e-10 epsilon and gives up ("Coplanar clip not handled")
+    // on near-coplanar faces from Float32 rounding at junctions. CDT uses scale-relative tolerances.
+    evaluator.useCDTClipping = true;
 
     // ── The 3 Material Slots ──
     const capMaterial = new THREE.MeshBasicMaterial({ visible: false });
