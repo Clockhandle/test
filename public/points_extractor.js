@@ -157,6 +157,7 @@ export function parseMeshJson(data) {
           currentSegment.isDuongLo    = isDuongLo;
           currentSegment.duongLoLayer  = duongLoLayer;
           currentSegment.tietDienName  = tietDienName;
+          currentSegment.doanName      = meshItem.DoanName || null;
           currentSegment.featureType   = featureType;
           currentSegment.blockName     = blockName;
           currentSegment.viaName       = viaName;

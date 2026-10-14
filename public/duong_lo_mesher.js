@@ -302,76 +302,172 @@ function generateLoai1Geometry(nocLine, bienL, bienR, nenLine, wallHeight, allPa
 
 // ── Loai 2: Extrusion Generators ────────────────────────────────────────────
 
+const PROFILE_TOL  = 0.01;   // m — tiết diện outline points closer than this to the simplified outline are dropped
+const MAX_TURN_DEG = 30;     // a bend sharper than this is rounded into several rings so they cannot fold
+const Z_SPIKE      = 10;     // m — a route vertex this far above/below both neighbours is reported as suspect
+
+// Douglas–Peucker on an open 2-D polyline ([x, y] pairs); keeps both ends.
+function simplifyOpen(P, tol) {
+    if (P.length < 3) return P;
+    const [a, b] = [P[0], P[P.length - 1]];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    let worst = 0, k = 0;
+    for (let i = 1; i < P.length - 1; i++) {
+        const d = L === 0 ? Math.hypot(P[i][0] - a[0], P[i][1] - a[1])
+            : Math.abs((b[0] - a[0]) * (a[1] - P[i][1]) - (a[0] - P[i][0]) * (b[1] - a[1])) / L;
+        if (d > worst) { worst = d; k = i; }
+    }
+    if (worst <= tol) return [a, b];
+    return [...simplifyOpen(P.slice(0, k + 1), tol).slice(0, -1), ...simplifyOpen(P.slice(k), tol)];
+}
+
+// Closed outline: split at the point farthest from the first, simplify both halves.
+function simplifyClosed(P, tol) {
+    let f = 0, fd = 0;
+    P.forEach((p, i) => { const d = Math.hypot(p[0] - P[0][0], p[1] - P[0][1]); if (d > fd) { fd = d; f = i; } });
+    const A = simplifyOpen(P.slice(0, f + 1), tol);
+    const B = simplifyOpen([...P.slice(f), P[0]], tol);
+    return [...A.slice(0, -1), ...B.slice(0, -1)];
+}
+
+// Tiết diện polyline → CCW outline centred on x, floor at y = 0 (the route is the floor line).
+function buildProfile(td) {
+    let pts = td.map(p => [p.x, p.y]);
+    const first = pts[0], last = pts[pts.length - 1];
+    if (Math.abs(first[0] - last[0]) < 1e-4 && Math.abs(first[1] - last[1]) < 1e-4) pts.pop();
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = Math.min(...ys);
+    pts = simplifyClosed(pts.map(([x, y]) => [x - cx, y - cy]), PROFILE_TOL);
+    let contour = pts.map(([x, y]) => new THREE.Vector2(x, y));
+    if (THREE.ShapeUtils.isClockWise(contour)) contour = contour.reverse();
+    // how far the outline reaches from the route: sets how much a sharp bend must be rounded
+    const extent = Math.max(...contour.map(p => Math.max(Math.abs(p.x), p.y)));
+    return { contour, extent, faces: THREE.ShapeUtils.triangulateShape(contour, []) };
+}
+
+// Replace each bend sharper than MAX_TURN_DEG by a circular arc sampled every ≤ MAX_TURN_DEG.
+// The arc's radius is just over how far the outline reaches from the route, so rings on the
+// inside of the bend cannot cross (unless the legs are too short to fit it).
+function roundSharpBends(P, extent) {
+    const maxTurn = MAX_TURN_DEG * Math.PI / 180;
+    const out = [P[0]];
+    for (let i = 1; i < P.length - 1; i++) {
+        const tIn = P[i].clone().sub(P[i - 1]), tOut = P[i + 1].clone().sub(P[i]);
+        const legIn = tIn.length(), legOut = tOut.length();
+        tIn.normalize(); tOut.normalize();
+        const turn = Math.acos(THREE.MathUtils.clamp(tIn.dot(tOut), -1, 1));
+        if (turn <= maxTurn || turn > Math.PI - 1e-3) { out.push(P[i]); continue; }
+        const d = Math.min(extent * 1.05 * Math.tan(turn / 2), 0.45 * legIn, 0.45 * legOut);
+        const r = d / Math.tan(turn / 2);
+        const A = P[i].clone().addScaledVector(tIn, -d);
+        const w = tOut.clone().addScaledVector(tIn, -tIn.dot(tOut)).normalize(); // towards the arc centre
+        const C = A.clone().addScaledVector(w, r);
+        const k = Math.ceil(turn / maxTurn);
+        for (let s = 0; s <= k; s++) {
+            const phi = turn * s / k;
+            out.push(C.clone().addScaledVector(w, -r * Math.cos(phi)).addScaledVector(tIn, r * Math.sin(phi)));
+        }
+    }
+    out.push(P[P.length - 1]);
+    return out;
+}
+
+// Sweep the outline along the route: one ring per route point, in the plane bisecting the bend
+// and stretched across the bend (a mitre), so straight runs between route points stay exact
+// prisms of the tiết diện. Rings are oriented with x level (Z-up), y towards the roof.
+function sweepProfile(route, profile) {
+    const { contour, faces } = profile;
+    const N = contour.length, R = route.length;
+    const Z = new THREE.Vector3(0, 0, 1);
+    const pos = new Float32Array(R * N * 3);
+    let lastN = new THREE.Vector3(1, 0, 0);
+    for (let r = 0; r < R; r++) {
+        const tIn  = r > 0     ? route[r].clone().sub(route[r - 1]).normalize() : null;
+        const tOut = r < R - 1 ? route[r + 1].clone().sub(route[r]).normalize() : null;
+        const m = (tIn && tOut ? tIn.clone().add(tOut) : (tIn || tOut).clone()).normalize();
+        let n = new THREE.Vector3().crossVectors(Z, m);
+        n = n.lengthSq() < 1e-10 ? lastN.clone() : n.normalize();
+        lastN = n;
+        const b = new THREE.Vector3().crossVectors(m, n).normalize();
+        // mitre: stretch by 1/cos(θ/2) along the bend direction inside the ring plane
+        let k = null, stretch = 0;
+        if (tIn && tOut) {
+            const bend = tOut.clone().sub(tIn);
+            bend.addScaledVector(m, -bend.dot(m));
+            if (bend.lengthSq() > 1e-12) {
+                k = bend.normalize();
+                stretch = 1 / Math.max(Math.cos(Math.acos(THREE.MathUtils.clamp(tIn.dot(tOut), -1, 1)) / 2), 0.2) - 1;
+            }
+        }
+        for (let j = 0; j < N; j++) {
+            const o = n.clone().multiplyScalar(contour[j].x).addScaledVector(b, contour[j].y);
+            if (k) o.addScaledVector(k, o.dot(k) * stretch);
+            const p = route[r].clone().add(o);
+            pos.set([p.x, p.y, p.z], (r * N + j) * 3);
+        }
+    }
+    // walls (outward for a CCW outline), then the two end caps
+    const index = [];
+    for (let r = 0; r < R - 1; r++)
+        for (let j = 0; j < N; j++) {
+            const a = r * N + j, b = r * N + (j + 1) % N, c = (r + 1) * N + (j + 1) % N, d = (r + 1) * N + j;
+            index.push(a, b, c, a, c, d);
+        }
+    const wallCount = index.length;
+    const area2 = ([i, j, l]) => (contour[j].x - contour[i].x) * (contour[l].y - contour[i].y)
+                              - (contour[l].x - contour[i].x) * (contour[j].y - contour[i].y);
+    for (const f of faces) {
+        const ccw = area2(f) > 0 ? f : [f[0], f[2], f[1]];          // faces +route direction
+        index.push(ccw[0], ccw[2], ccw[1]);                          // start cap faces back
+        const e = (R - 1) * N;
+        index.push(e + ccw[0], e + ccw[1], e + ccw[2]);              // end cap faces forward
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(R * N * 2), 2));
+    geom.setIndex(index);
+    geom.addGroup(0, wallCount, 1);
+    geom.addGroup(wallCount, index.length - wallCount, 0);
+    geom.computeVertexNormals();
+    return geom;
+}
+
+// Route vertices far above or below both neighbours, reached by steep legs: almost always a typo.
+function reportZSpikes(seg, route, offset) {
+    for (let i = 1; i < route.length - 1; i++) {
+        const dzIn = route[i].z - route[i - 1].z, dzOut = route[i + 1].z - route[i].z;
+        if (Math.sign(dzIn) === Math.sign(dzOut) || Math.min(Math.abs(dzIn), Math.abs(dzOut)) < Z_SPIKE) continue;
+        const p = route[i].clone().add(offset);
+        console.warn(`[DuongLo] ${seg.doanName || seg.handle}: vertex ${i} (${p.x.toFixed(2)}, ${p.y.toFixed(2)}, z ${p.z.toFixed(2)}) ` +
+            `is ${Math.abs(dzIn).toFixed(1)} m / ${Math.abs(dzOut).toFixed(1)} m off its neighbours — check the Z value`);
+    }
+}
+
 function generateLoai2Geometries(nenSegs, tietDienSegs, materials, globalOffset, allPaths) {
     const brushes = [];
     if (!nenSegs.length || !tietDienSegs.length) return brushes;
 
-    const shapeMap = new Map();
-    let fallbackShape = null;
-
+    const profiles = new Map();
+    let fallbackName = null;
     for (const td of tietDienSegs) {
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        
-        const xs = td.map(p => p.x);
-        const ys = td.map(p => p.y); 
-        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-        const cy = (Math.min(...ys));
-
-        const profile = new THREE.Shape();
-        const first = td[0], last = td[td.length - 1];
-        let pts = [...td];
-        
-        if (Math.abs(first.x - last.x) < 1e-4 && Math.abs(first.y - last.y) < 1e-4) {
-            pts.pop();
-        }
-
-        pts.forEach((p, i) => {
-            const px = p.x - cx;
-            const py = p.y - cy; 
-            if (i === 0) profile.moveTo(px, py);
-            else profile.lineTo(px, py);
-        });
-        
-        shapeMap.set(td.tietDienName, profile);
-        if (!fallbackShape) fallbackShape = profile;
+        profiles.set(td.tietDienName, buildProfile(td));
+        if (fallbackName === null) fallbackName = td.tietDienName;
     }
 
     for (const nenSeg of nenSegs) {
         if (nenSeg.length < 2) continue;
-        const profile = shapeMap.get(nenSeg.tietDienName) || fallbackShape;
-        if (!profile) continue;
+        let profile = profiles.get(nenSeg.tietDienName);
+        if (!profile) {
+            console.warn(`[DuongLo] ${nenSeg.doanName || nenSeg.handle}: tiết diện "${nenSeg.tietDienName}" is not in the file — drawn with "${fallbackName}" instead`);
+            profile = profiles.get(fallbackName);
+        }
 
-        const pts = nenSeg.map(p => new THREE.Vector3(p.x, p.y, p.z).sub(globalOffset));
-        const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0);
+        const pts = nenSeg.map(p => new THREE.Vector3(p.x, p.y, p.z).sub(globalOffset))
+            .filter((p, i, a) => i === 0 || p.distanceToSquared(a[i - 1]) > 1e-12);
+        if (pts.length < 2) continue;
+        reportZSpikes(nenSeg, pts, globalOffset);
 
-        curve.computeFrenetFrames = function(steps) {
-            const tangents = [], normals = [], binormals = [];
-            for ( let i = 0; i <= steps; i ++ ) {
-                const t = this.getTangentAt(i / steps).normalize();
-                tangents.push(t);
-
-                let up = new THREE.Vector3(0, 0, 1); 
-                let b = up.clone();
-                let n = new THREE.Vector3().crossVectors(b, t);
-                
-                if (n.lengthSq() < 1e-10) n.set(1, 0, 0); 
-                else n.normalize();
-
-                b.crossVectors(t, n).normalize();
-                normals.push(n);
-                binormals.push(b);
-            }
-            return { tangents, normals, binormals };
-        };
-
-        let geom = new THREE.ExtrudeGeometry(profile, {
-            steps: pts.length * 4,
-            bevelEnabled: false,
-            extrudePath: curve
-        });
-
-        geom = mergeVertices(geom);
-        geom.computeVertexNormals();
+        const geom = sweepProfile(roundSharpBends(pts, profile.extent), profile);
 
         const startPt = pts[0];
         const endPt = pts[pts.length - 1];
@@ -477,23 +573,41 @@ export function buildDuongLoMesh(rawDataSegments, meshGroup, wallHeight = 0) {
 
     if (allBrushes.length === 0) return;
 
-    console.log(`[DuongLo CSG] Starting union on ${allBrushes.length} tunnel branches...`);
-    let combinedMesh = allBrushes[0];
-
-    for (let i = 1; i < allBrushes.length; i++) {
-        try {
-            combinedMesh = evaluator.evaluate(combinedMesh, allBrushes[i], ADDITION);
-        } catch (err) {
-            console.warn(`[CSG Union] Failed merging segment ${i}:`, err);
+    // Union only branches that touch: group them by overlapping bounding boxes, and merge each
+    // group in an order where every branch overlaps what is already merged. Branches that touch
+    // nothing skip CSG entirely. A branch whose union fails is kept as its own piece.
+    const boxes = allBrushes.map(b => { b.geometry.computeBoundingBox(); return b.geometry.boundingBox.clone().expandByScalar(0.1); });
+    const touching = allBrushes.map((_, i) => allBrushes.map((_, j) => j).filter(j => j !== i && boxes[i].intersectsBox(boxes[j])));
+    const seen = new Set(), pieces = [];
+    for (let s = 0; s < allBrushes.length; s++) {
+        if (seen.has(s)) continue;
+        const order = [s]; seen.add(s);
+        for (let q = 0; q < order.length; q++)
+            for (const j of touching[order[q]]) if (!seen.has(j)) { seen.add(j); order.push(j); }
+        let merged = allBrushes[order[0]];
+        for (const i of order.slice(1)) {
+            try {
+                merged = evaluator.evaluate(merged, allBrushes[i], ADDITION);
+            } catch (err) {
+                console.warn(`[CSG Union] Failed merging branch ${i}; keeping it as a separate piece:`, err);
+                pieces.push(allBrushes[i]);
+            }
         }
+        pieces.push(merged);
     }
+    console.log(`[DuongLo CSG] ${allBrushes.length} branches → ${pieces.length} piece(s)`);
 
-    combinedMesh.name = 'DuongLo_Unified_CSG_Mesh';
-    combinedMesh.castShadow = true;
-    combinedMesh.receiveShadow = true;
-    combinedMesh.position.copy(globalOffset);
-    combinedMesh.updateMatrixWorld(true);
-    grp.add(combinedMesh);
-
-    console.log(`[DuongLo CSG] Successfully united tunnel network.`);
+    pieces.forEach((piece, k) => {
+        // CSG output repeats each corner for every triangle; share them. The materials are unlit,
+        // so normals and UVs are dropped first, and only positions decide what is shared.
+        let geom = piece.geometry;
+        geom.deleteAttribute('normal');
+        geom.deleteAttribute('uv');
+        geom = mergeVertices(geom);
+        const mesh = new THREE.Mesh(geom, materials);
+        mesh.name = k === 0 ? 'DuongLo_Unified_CSG_Mesh' : `DuongLo_Unified_CSG_Mesh_${k}`;
+        mesh.position.copy(globalOffset);
+        mesh.updateMatrixWorld(true);
+        grp.add(mesh);
+    });
 }
